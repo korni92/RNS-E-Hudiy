@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#
+#v1.3.6
 # can_base_function.py
 #
 # This service provides base CAN bus functionality, including TV Tuner simulation,
