@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#
+#v1.0.0
 # can_fis_writer.py
 #
 # This service periodically sends custom text to the instrument cluster
@@ -174,3 +174,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
