@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#
+#v2.0.0
 # can_handler.py (Refactored)
 #
 # This service acts as the central CAN bus gateway.
@@ -244,3 +244,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
