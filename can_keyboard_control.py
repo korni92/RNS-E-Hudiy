@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#
+#v2.0.0
 # can_keyboard_control.py (Refactored)
 #
 # Listens for specific CAN bus messages published by can_handler.py via ZeroMQ
@@ -350,3 +350,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
