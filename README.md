@@ -349,3 +349,54 @@ journalctl -u can-keyboard-control.service -f
   * **`OSError: [Errno 19] No such device`** in `can-keyboard-control.service` log: The `uinput` module isn't loaded. This was fixed in Step 3, but a reboot is required for it to take effect.
   * **Permission Denied:** A file or directory has the wrong owner. Use `sudo chown -R pi:pi /path/to/dir` to fix.
   * **Service fails with `code=exited, status=1/FAILURE`:** Check the logs (`journalctl`) for a Python `Traceback`. This usually points to a missing config key or a bug in the script.
+
+-----
+
+-----
+
+## Using Composite Video Output on Pi4
+
+To use composite video output with the Pi4, you need to edit `config.txt` and `cmdline.txt` to set the custom resolution for the RNS-E `800x480` for 193 PU models or `480x234` for the older 192 model. 
+
+in `config.txt` under `[all]` you need to add this section. Uncomment the settings you need for your RNS-E
+
+```bash
+# Force HDMI driver 2 for audio compatibility (standard DMT/custom mode practice)
+hdmi_drive=2 
+hdmi_ignore_hotplug=1
+
+# --- RNS-E DISPLAY CONFIGURATION BLOCKS ---
+# 
+# To use a configuration, uncomment ONE of the blocks below:
+#
+
+# --- 1. RNS-E 193 (800 x 480 pixels) ---
+# hdmi_cvt=800 480 60 6 0 0 0 
+# hdmi_group=2
+# hdmi_mode=87
+# enable_tvout=1
+# overscan_scale=1
+# # Overscan/Margins (Set all to 0 if the image fits perfectly)
+# overscan_bottom=0
+# overscan_top=0 
+# overscan_left=0
+# overscan_right=0
+
+# --- 2. RNS-E 192 / Old (480 x 234 pixels) ---
+# hdmi_cvt=480 234 60 6 0 0 0
+# hdmi_group=2
+# hdmi_mode=87
+# enable_tvout=1
+# overscan_scale=1
+# # Overscan/Margins (Set all to 0 if the image fits perfectly)
+# overscan_bottom=0
+# overscan_top=0 
+# overscan_left=0
+# overscan_right=0
+```
+
+in `cmdline.txt` you have to add at the end and replace XXXxXXX@60 with your resolution. If the picture isn't centered, too big or you have borders, you can add values to `margin_left` `margin_right` `margin_top` or `margin_bottom`. Positive values shrink the picture to this side and negative ones will extend it. 
+
+```bash
+video=Composite-1:XXXxXXX@60,margin_left=0,margin_right=0,margin_top=0,margin_bottom=0
+```
