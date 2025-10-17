@@ -1,0 +1,91 @@
+# For more options and information see
+# http://rptl.io/configtxt
+# Some settings may impact device functionality. See link above for details
+
+# Uncomment some or all of these to enable the optional hardware interfaces
+#dtparam=i2c_arm=on
+#dtparam=i2s=on
+dtparam=spi=on
+
+# Enable audio (loads snd_bcm2835)
+dtparam=audio=on
+
+# Additional overlays and parameters are documented
+# /boot/firmware/overlays/README
+
+# Automatically load overlays for detected cameras
+camera_auto_detect=1
+
+# Automatically load overlays for detected DSI displays
+display_auto_detect=1
+
+# Automatically load initramfs files, if found
+auto_initramfs=1
+
+# Enable DRM VC4 V3D driver
+# Using FKMS for composite video is necessary for these custom modes
+dtoverlay=vc4-fkms-v3d,composite=1
+max_framebuffers=2
+
+# Don't have the firmware create an initial video= setting in cmdline.txt.
+# Use the kernel's default instead.
+disable_fw_kms_setup=1
+
+# Run in 64-bit mode
+arm_64bit=1
+
+# Disable compensation for displays with overscan
+disable_overscan=1
+
+# Run as fast as firmware / board allows
+arm_boost=1
+
+[cm4]
+# Enable host mode on the 2711 built-in XHCI USB controller.
+# This line should be removed if the legacy DWC2 controller is required
+# (e.g. for USB device mode) or if USB support is not required.
+otg_mode=1
+
+[cm5]
+dtoverlay=dwc2,dr_mode=host
+
+[all]
+disable_splash=1
+
+# Force HDMI driver 2 for audio compatibility (standard DMT/custom mode practice)
+hdmi_drive=2 
+hdmi_ignore_hotplug=1
+
+# --- RNS-E DISPLAY CONFIGURATION BLOCKS ---
+# 
+# To use a configuration, uncomment ONE of the blocks below:
+#
+
+# --- 1. RNS-E 193 (800 x 480 pixels) ---
+hdmi_cvt=800 480 60 6 0 0 0 
+hdmi_group=2
+hdmi_mode=87
+enable_tvout=1
+overscan_scale=1
+# Overscan/Margins (Set all to 0 if the image fits perfectly)
+# overscan_bottom=0
+# overscan_top=0 
+# overscan_left=0
+# overscan_right=0
+
+# --- 2. RNS-E 192 / Old (480 x 234 pixels) ---
+# hdmi_cvt=480 234 60 6 0 0 0
+# hdmi_group=2
+# hdmi_mode=87
+# enable_tvout=1
+# overscan_scale=1
+# # Overscan/Margins (Set all to 0 if the image fits perfectly)
+# overscan_bottom=0
+# overscan_top=0 
+# overscan_left=0
+# overscan_right=0
+
+
+# --- RNS-E Pi Control CAN HAT ---
+dtparam=spi=on
+dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25,spimaxfrequency=1000000
