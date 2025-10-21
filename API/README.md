@@ -54,7 +54,7 @@ Go back to the main directory:
 ```bash
 cd ..
 ```
-Create `run_client.py` (copy-paste the code from previous responses, or use this command to create it):
+Create `run_client.py`
 ```bash
 cat > run_client.py << 'EOF'
 #!/usr/bin/env python3
