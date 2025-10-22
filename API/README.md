@@ -32,7 +32,7 @@ source venv/bin/activate
 ## Step 3: Install Python Packages
 Inside the virtual environment:
 ```bash
-pip install protobuf websocket-client
+pip install protobuf websocket-client pyzmq
 ```
 
 ## Step 4: Create API Files Directory
@@ -44,134 +44,22 @@ cd api_files
 ## Step 5: Download and Generate Protobuf
 Download the protobuf definition (from Hudiy GitHub):
 ```bash
+mkdir api_files
+cd api_files
+# Download proto from GitHub
 wget https://raw.githubusercontent.com/wiboma/hudiy/main/api/hudiy_api.proto
 protoc --python_out=. hudiy_api.proto
+mv hudiy_api_pb2.py Api_pb2.py  # For official client
+cd ..
 ```
 This generates `hudiy_api_pb2.py`.
 
-## Step 6: Create the Client Script
-Go back to the main directory:
-```bash
-cd ..
+## Step 5.1: Add Official Client Files
 ```
-Create `run_client.py`
-```bash
-cat > run_client.py << 'EOF'
-#!/usr/bin/env python3
-import socket
-import struct
-import time
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + '/api_files')
-from hudiy_api_pb2 import *
-
-class HudiyClient:
-    def __init__(self, host='localhost', port=44405):
-        self.host = host
-        self.port = port
-        self.sock = None
-        
-    def connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((self.host, self.port))
-        print(f"✅ Connected: {self.host}:{self.port}")
-        self.send_hello()
-        
-    def send_hello(self):
-        hello = HelloRequest()
-        hello.name = "QuickClient"
-        hello.api_version.major = 1
-        hello.api_version.minor = 0
-        self.send_message(MESSAGE_HELLO_REQUEST, hello)
-        
-    def send_message(self, msg_type, message):
-        data = message.SerializeToString()
-        frame = struct.pack('<III', len(data), msg_type, 0) + data
-        self.sock.sendall(frame)
-        
-    def receive_message(self):
-        size_data = self.sock.recv(4)
-        size = struct.unpack('<I', size_data)[0]
-        header_data = self.sock.recv(8)
-        msg_id = struct.unpack('<I', header_data[:4])[0]
-        data = b''
-        while len(data) < size:
-            data += self.sock.recv(size - len(data))
-        return msg_id, data
-        
-    def subscribe_all(self):
-        subs = SetStatusSubscriptions()
-        subs.subscriptions.extend([
-            SetStatusSubscriptions.MEDIA,
-            SetStatusSubscriptions.PHONE,
-            SetStatusSubscriptions.OBD
-        ])
-        self.send_message(MESSAGE_SET_STATUS_SUBSCRIPTIONS, subs)
-    
-    def play_pause(self):
-        action = DispatchAction()
-        action.action = "now_playing_toggle_play"
-        self.send_message(MESSAGE_DISPATCH_ACTION, action)
-        print("⏯️ Play/Pause")
-    
-    def volume_up(self):
-        action = DispatchAction()
-        action.action = "output_volume_up"
-        self.send_message(MESSAGE_DISPATCH_ACTION, action)
-        print("🔊 Volume UP")
-    
-    def listen(self):
-        print("👀 Monitoring... (Ctrl+C to stop)")
-        try:
-            while True:
-                msg_id, data = self.receive_message()
-                if msg_id == MESSAGE_MEDIA_STATUS:
-                    status = MediaStatus()
-                    status.ParseFromString(data)
-                    print(f"🎵 {'▶️' if status.is_playing else '⏸️'} {status.position_label}")
-                time.sleep(0.1)
-        except KeyboardInterrupt:
-            print("\n👋 Stopped monitoring")
-
-def main():
-    print("🚗 Hudiy Client Starting...")
-    client = HudiyClient(port=44405)
-    
-    try:
-        client.connect()
-        client.subscribe_all()
-        
-        print("\n🎛️ COMMANDS:")
-        print("1 = Play/Pause | 2 = Volume Up | 3 = Monitor | 0 = Quit")
-        
-        while True:
-            cmd = input("\n> ").strip()
-            if cmd == "1": client.play_pause()
-            elif cmd == "2": client.volume_up()
-            elif cmd == "3": client.listen()
-            elif cmd == "0": break
-                    
-    except KeyboardInterrupt:
-        pass
-    finally:
-        client.sock.close()
-
-if __name__ == "__main__":
-    main()
-EOF
+mkdir -p api_files/common
 ```
-Make it executable:
-```bash
-chmod +x run_client.py
-```
+Add Client.py and ClientEventHandler.py to the directory
 
-## Step 7: Run the Client
-```bash
-python3 run_client.py
-```
-- Follow on-screen commands (e.g., "1" for play/pause).
-- Use Ctrl+C to stop monitoring or exit.
 
 ## Troubleshooting
 - **Broken Pipe Error**: Connection closed unexpectedly—restart Hudiy and retry.
