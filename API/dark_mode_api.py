@@ -1,28 +1,11 @@
 #!/usr/bin/env python3
 """
-Dark Mode Toggle
-Simple: python3 dark_mode_api.py [on|off]
-Threading: Non-blocking + Auto-retry
-1 Line Output
-"""
-
-import socket
-import struct
-import sys
-import os
-import time
-import threading
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + '/api_files')
-from hudiy_api_pb2 import *#!/usr/bin/env python3
-"""
 Hudiy Dark Mode Service
 
 This service listens for CAN bus messages (via ZMQ from can_handler.py)
 to automatically toggle the Hudiy day/night mode.
 
-It reads /home/pi/config.json to check if the feature is enabled
-and to get the cooldown period.
+It reads /home/pi/config.json to check if the feature is enabled.
 """
 
 import socket
@@ -65,7 +48,7 @@ def send_dark_mode(enabled, max_retries=3):
     'enabled=True' means Dark Mode (Night).
     'enabled=False' means Light Mode (Day).
     """
-    mode_str = '?? Dark (night)' if enabled else '?? Light (day)'
+    mode_str = '🌙 Dark (night)' if enabled else '☀️ Light (day)'
     for attempt in range(max_retries):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -113,7 +96,8 @@ def load_config(config_path='/home/pi/config.json'):
             'zmq_publish_address': config_data.get('zmq', {}).get('publish_address'),
             'light_status_can_id': config_data.get('can_ids', {}).get('light_status'),
             'day_night_mode': config_data.get('features', {}).get('day_night_mode', False),
-            'daynight_cooldown_seconds': config_data.get('thresholds', {}).get('daynight_cooldown_seconds', 10)
+            # --- REMOVED --- Cooldown is no longer needed
+            # 'daynight_cooldown_seconds': config_data.get('thresholds', {}).get('daynight_cooldown_seconds', 10)
         }
 
         # Check for critical missing values
@@ -140,18 +124,23 @@ def main():
     if not config:
         sys.exit(1)
 
+    # Check for feature flag
     if not config.get('day_night_mode'):
         logger.info("Day/Night mode feature is disabled in config.json. Exiting.")
         sys.exit(0)
     
     logger.info("Day/Night mode feature is enabled.")
 
-    cooldown_seconds = config.get('daynight_cooldown_seconds')
-    logger.info(f"Using a {cooldown_seconds} second cooldown for API calls.")
+    # --- REMOVED --- Cooldown logic is removed
+    # cooldown_seconds = config.get('daynight_cooldown_seconds')
+    # logger.info(f"Using a {cooldown_seconds} second cooldown for API calls.")
 
+    # Set default dark mode state on startup
     logger.info("Setting default state to dark mode (night) on startup...")
     send_dark_mode(enabled=True)
-    last_api_call_time = 0 
+    
+    # --- REMOVED --- Cooldown logic is removed
+    # last_api_call_time = 0 
 
     # --- ZMQ Connection ---
     zmq_address = config['zmq_publish_address']
@@ -172,8 +161,9 @@ def main():
     socket.setsockopt_string(zmq.SUBSCRIBE, can_topic)
     logger.info(f"Subscribed to ZMQ topic: {can_topic}")
 
-    # State variables
-    light_status = None
+    # State variables from your logic snippet
+    # --- MODIFIED --- Start in night mode to match the default API call
+    light_status = 1 
     last_msg_data = None
 
     logger.info("Day/Night service started. Waiting for CAN messages...")
@@ -190,6 +180,7 @@ def main():
 
             first_message = last_msg_data is None
 
+            # Check 1: Only process if the CAN message data has changed
             if first_message or data_hex != last_msg_data:
                 
                 try:
@@ -202,22 +193,19 @@ def main():
                 # 1 = night (dark mode on), 0 = day (dark mode off)
                 new_light_status = 1 if light_value > 0 else 0
 
+                # Check 2: Only send API call if the *calculated state* has changed
                 if first_message or (new_light_status != light_status):
                     
                     is_dark_mode_enabled = (new_light_status == 1) 
                     mode_str = 'night' if is_dark_mode_enabled else 'day'
-                    logger.info(f"Light status changed (CAN Value: {light_value}). Desired mode: {mode_str}.")
+                    logger.info(f"State change detected (CAN Value: {light_value}). Desired mode: {mode_str}.")
                     
-                    current_time = time.time()
-                    if current_time - last_api_call_time < cooldown_seconds:
-                        logger.info(f"Change detected, but still in {cooldown_seconds}s cooldown. Skipping API call.")
-                    else:
-                        logger.info("Cooldown elapsed. Sending API command.")
-                        # Only update timestamp if send is successful
-                        if send_dark_mode(is_dark_mode_enabled):
-                            last_api_call_time = current_time
+                    # --- MODIFIED ---
+                    # Removed the buggy cooldown check. This logic is sufficient.
+                    logger.info("Sending API command.")
+                    send_dark_mode(is_dark_mode_enabled)
 
-                # Update state regardless of cooldown
+                # Update state *regardless* of whether the API was called
                 light_status = new_light_status
                 last_msg_data = data_hex
 
@@ -241,55 +229,6 @@ def main():
     socket.close()
     context.term()
     logger.info("Day/Night service stopped.")
-
-if __name__ == '__main__':
-    main()
-
-def send_dark_mode(enabled, max_retries=3):
-    """Thread-safe dark mode with auto-retry"""
-    for attempt in range(max_retries):
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2.0)
-            sock.connect(('localhost', 44405))
-            
-            # Hello
-            hello = HelloRequest()
-            hello.name = "DarkMode"
-            hello.api_version.major = 1
-            hello.api_version.minor = 0
-            data = hello.SerializeToString()
-            frame = struct.pack('<III', len(data), MESSAGE_HELLO_REQUEST, 0) + data
-            sock.sendall(frame)
-            
-            # Dark mode
-            dark = SetDarkMode()
-            dark.enabled = enabled
-            data = dark.SerializeToString()
-            frame = struct.pack('<III', len(data), MESSAGE_SET_DARK_MODE, 0) + data
-            sock.sendall(frame)
-            
-            sock.close()
-            return True
-            
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(0.5)
-                continue
-            return False
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 dark_mode_api.py [on|off]")
-        sys.exit(1)
-    
-    enabled = sys.argv[1].lower() == 'on'
-    success = send_dark_mode(enabled)
-    
-    if success:
-        print(f"{'🌙 Dark' if enabled else '☀️ Light'} mode set")
-    else:
-        print(f"❌ Failed to set {'dark' if enabled else 'light'} mode")
 
 if __name__ == '__main__':
     main()
