@@ -67,3 +67,58 @@ Add Client.py and ClientEventHandler.py to the directory
 - **Connection Refused**: Verify Hudiy is running and ports match.
 
 This setup works as shown in your output. Expand the script for more features like OBD queries!
+
+## Adding Servive to start scripts
+
+```
+sudo nano /etc/systemd/system/dark_mode.service
+```
+
+```
+[Unit]
+Description=Hudiy Dark Mode CAN Bus Service
+Requires=configure-can0.service
+Requires=can-handler.service
+After=network.target configure-can0.service can_handler.service
+
+[Service]
+User=pi
+Group=pi
+
+WorkingDirectory=/home/pi/hudiy_client
+
+# It runs the python3 *from inside* your venv
+ExecStart=/home/pi/hudiy_client/venv/bin/python3 /home/pi/hudiy_client/dark_mode_api.py
+
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```
+sudo systemctl daemon-reload
+```
+
+```
+sudo systemctl enable dark_mode.service
+```
+
+```
+sudo systemctl start dark_mode.service
+```
+
+## Troubleshooting service
+
+```
+systemctl status dark_mode.service
+```
+
+```
+journalctl -u dark_mode.service -f
+```
+
+```
+sudo systemctl restart dark_mode.service
+```
