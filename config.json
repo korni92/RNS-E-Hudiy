@@ -1,9 +1,11 @@
 {
+  "platform": "A2",
   "can_interface": "can0",
   "zmq": {
     "publish_address": "ipc:///run/rnse_control/can_stream.ipc",
     "send_address": "ipc:///run/rnse_control/can_send.ipc",
-    "hudiy_publish_address": "ipc:///run/rnse_control/hudiy_stream.ipc"
+    "hudiy_publish_address": "ipc:///run/rnse_control/hudiy_stream.ipc",
+    "dis_draw": "ipc:///run/rnse_control/dis_draw.ipc"
   },
   "can_ids": {
     "light_status": "0x635",
@@ -115,6 +117,18 @@
      "tv_mode_identifier": "0x37",
      "play_key": "KEY_X",
      "pause_key": "KEY_C"
+  },
+  "platforms": {
+    "A2": {
+      "R_CLAIM": [82, 5, 128, 0, 27, 64, 48],
+      "R_CLEAR": [82, 5, 2, 0, 27, 64, 48],
+      "WAIT_FOR_ACK": [83, 133]
+    },
+    "TT": {
+      "R_CLAIM": [82, 5, 128, 0, 0, 64, 88],
+      "R_CLEAR": [82, 5, 2, 0, 0, 64, 88],
+      "WAIT_FOR_ACK": [83, 132]
+    }
   }
 }
 
