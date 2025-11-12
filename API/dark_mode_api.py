@@ -96,8 +96,6 @@ def load_config(config_path='/home/pi/config.json'):
             'zmq_publish_address': config_data.get('zmq', {}).get('publish_address'),
             'light_status_can_id': config_data.get('can_ids', {}).get('light_status'),
             'day_night_mode': config_data.get('features', {}).get('day_night_mode', False),
-            # --- REMOVED --- Cooldown is no longer needed
-            # 'daynight_cooldown_seconds': config_data.get('thresholds', {}).get('daynight_cooldown_seconds', 10)
         }
 
         # Check for critical missing values
@@ -129,18 +127,7 @@ def main():
         logger.info("Day/Night mode feature is disabled in config.json. Exiting.")
         sys.exit(0)
     
-    logger.info("Day/Night mode feature is enabled.")
-
-    # --- REMOVED --- Cooldown logic is removed
-    # cooldown_seconds = config.get('daynight_cooldown_seconds')
-    # logger.info(f"Using a {cooldown_seconds} second cooldown for API calls.")
-
-    # Set default dark mode state on startup
-    logger.info("Setting default state to dark mode (night) on startup...")
-    send_dark_mode(enabled=True)
-    
-    # --- REMOVED --- Cooldown logic is removed
-    # last_api_call_time = 0 
+    logger.info("Day/Night mode feature is enabled.") 
 
     # --- ZMQ Connection ---
     zmq_address = config['zmq_publish_address']
@@ -160,9 +147,6 @@ def main():
         
     socket.setsockopt_string(zmq.SUBSCRIBE, can_topic)
     logger.info(f"Subscribed to ZMQ topic: {can_topic}")
-
-    # State variables from your logic snippet
-    # --- MODIFIED --- Start in night mode to match the default API call
     light_status = 1 
     last_msg_data = None
 
@@ -200,12 +184,10 @@ def main():
                     mode_str = 'night' if is_dark_mode_enabled else 'day'
                     logger.info(f"State change detected (CAN Value: {light_value}). Desired mode: {mode_str}.")
                     
-                    # --- MODIFIED ---
-                    # Removed the buggy cooldown check. This logic is sufficient.
                     logger.info("Sending API command.")
                     send_dark_mode(is_dark_mode_enabled)
 
-                # Update state *regardless* of whether the API was called
+                # Update state of whether the API was called
                 light_status = new_light_status
                 last_msg_data = data_hex
 
