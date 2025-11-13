@@ -85,7 +85,7 @@ These steps are **critical** for allowing the Python scripts to access the neces
 2.  **Set Ownership:**
 
     ```bash
-    sudo chown -R pi:pi /home/pi/RNS-E-Pi-Control
+    sudo chown -R pi:pi /home/pi/rns-e_can
     ```
 
 -----
@@ -201,8 +201,8 @@ These service files ensure your scripts start in the correct order on boot and r
     [Service]
     User=pi
     Group=pi
-    WorkingDirectory=/home/pi/RNS-E-Pi-Control
-    ExecStart=/usr/bin/python3 /home/pi/RNS-E-Pi-Control/can_handler.py
+    WorkingDirectory=/home/pi/rns-e_can
+    ExecStart=/usr/bin/python3 /home/pi/rns-e_can/can_handler.py
     Restart=on-failure
     RestartSec=5
 
@@ -229,8 +229,8 @@ These service files ensure your scripts start in the correct order on boot and r
     BindsTo=can-handler.service
 
     [Service]
-    ExecStart=/usr/bin/python3 /home/pi/RNS-E-Pi-Control/can_base_function.py
-    WorkingDirectory=/home/pi/RNS-E-Pi-Control
+    ExecStart=/usr/bin/python3 /home/pi/rns-e_can/can_base_function.py
+    WorkingDirectory=/home/pi/rns-e_can
     User=pi
     Group=pi
     Restart=on-failure
@@ -259,8 +259,8 @@ These service files ensure your scripts start in the correct order on boot and r
     BindsTo=can-handler.service
 
     [Service]
-    ExecStart=/usr/bin/python3 /home/pi/RNS-E-Pi-Control/can_keyboard_control.py
-    WorkingDirectory=/home/pi/RNS-E-Pi-Control
+    ExecStart=/usr/bin/python3 /home/pi/rns-e_can/can_keyboard_control.py
+    WorkingDirectory=/home/pi/rns-e_can
     Restart=on-failure
     RestartSec=3
     User=pi
@@ -269,38 +269,6 @@ These service files ensure your scripts start in the correct order on boot and r
     [Install]
     WantedBy=multi-user.target
     ```
-
-    \</details\>
-
-5.  **File 5: `can-fis-writer.service`**
-
-    ```bash
-    sudo nano /etc/systemd/system/can-fis-writer.service
-    ```
-
-    \<details\>
-    \<summary\>Click to view content\</summary\>
-
-    ```ini
-    [Unit]
-    Description=RNS-E FIS Display Writer
-    Requires=can-handler.service
-    After=can-handler.service
-    BindsTo=can-handler.service
-
-    [Service]
-    ExecStart=/usr/bin/python3 /home/pi/RNS-E-Pi-Control/can_fis_writer.py
-    WorkingDirectory=/home/pi/RNS-E-Pi-Control
-    Restart=on-failure
-    RestartSec=10
-    User=pi
-    Group=pi
-
-    [Install]
-    WantedBy=multi-user.target
-    ```
-
-    \</details\>
 
 -----
 
