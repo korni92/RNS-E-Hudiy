@@ -49,7 +49,7 @@ cd api_files
 # Download proto from GitHub
 wget https://raw.githubusercontent.com/wiboma/hudiy/main/api/Api.proto
 protoc --python_out=. Api.proto
-mv hudiy_api_pb2.py Api_pb2.py  # For official client
+mv Api_pb2.py Api_pb2.py  # For official client
 cd ..
 ```
 This generates `hudiy_api_pb2.py`.
