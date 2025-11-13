@@ -52,13 +52,13 @@ protoc --python_out=. Api.proto
 mv Api_pb2.py Api_pb2.py  # For official client
 cd ..
 ```
-This generates `hudiy_api_pb2.py`.
+This generates `Api_pb2.py`.
 
 ## Step 5.1: Add Official Client Files
 ```
 mkdir -p api_files/common
 ```
-Add Client.py and ClientEventHandler.py to the directory
+Add Client.py and ClientEventHandler.py to the directory from Hudiy GitHub
 
 
 ## Troubleshooting
