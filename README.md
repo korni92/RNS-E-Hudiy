@@ -282,7 +282,7 @@ Enable the new services to start on boot and reboot the system for all changes t
     ```
 2.  **Enable all 5 services to start on boot:**
     ```bash
-    sudo systemctl enable configure-can0.service can-handler.service can-base-function.service can-keyboard-control.service can-fis-writer.service
+    sudo systemctl enable configure-can0.service can-handler.service can-base-function.service can-keyboard-control.service
     ```
 3.  **Reboot the Raspberry Pi:**
     ```bash
