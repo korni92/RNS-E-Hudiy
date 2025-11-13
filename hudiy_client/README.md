@@ -38,18 +38,15 @@ pip install protobuf websocket-client pyzmq
 ## Step 4: Create API Files Directory
 ```bash
 mkdir api_files
-cd api_files
 ```
 
 ## Step 5: Download and Generate Protobuf
-Download the protobuf definition (from Hudiy GitHub):
+Download the protobuf definition Api.proto(from Hudiy GitHub):
 ```bash
-mkdir api_files
-cd api_files
-# Download proto from GitHub
+mkdir -p api/files/common
+cd api_files/common
 wget https://raw.githubusercontent.com/wiboma/hudiy/main/api/Api.proto
 protoc --python_out=. Api.proto
-mv Api_pb2.py Api_pb2.py  # For official client
 cd ..
 ```
 This generates `Api_pb2.py`.
@@ -58,7 +55,7 @@ This generates `Api_pb2.py`.
 ```
 mkdir -p api_files/common
 ```
-Add Client.py and ClientEventHandler.py to the directory from Hudiy GitHub
+Add Client.py and Message.py to the directory from Hudiy GitHub
 
 
 ## Troubleshooting
