@@ -47,8 +47,8 @@ Download the protobuf definition (from Hudiy GitHub):
 mkdir api_files
 cd api_files
 # Download proto from GitHub
-wget https://raw.githubusercontent.com/wiboma/hudiy/main/api/hudiy_api.proto
-protoc --python_out=. hudiy_api.proto
+wget https://raw.githubusercontent.com/wiboma/hudiy/main/api/Api.proto
+protoc --python_out=. Api.proto
 mv hudiy_api_pb2.py Api_pb2.py  # For official client
 cd ..
 ```
