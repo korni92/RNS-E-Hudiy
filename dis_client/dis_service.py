@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# Audi DIS (Cluster) DDP Service - V1.3
+# Audi DIS (Cluster) DDP Service - V1.6
 #
 # - Uses new 'release_screen()' (0x33) for inactivity timeout.
-#   This keeps the session open for stable reconnects.
+# - Updated to use ddp_protocol V1.3+ with detect_and_open_session()
+# - Fixed claim_nav_screen() to support both Red and White DIS (V1.5)
+# - Corrected RED DIS claim handshake based on RNS-E log (V1.6)
 #
 import zmq
 import json
@@ -93,7 +95,7 @@ class DisService:
         """Translates a standard Python string into a list of AUDSCII bytes."""
         return [self.audscii_trans[ord(c) % 256] for c in text]
 
-    # Application Logic Functions (Payload Generation)
+    # --- Application Logic Functions (Payload Generation) ---
 
     def claim_nav_screen(self):
         """Performs the full "Claim Screen" handshake."""
@@ -101,45 +103,66 @@ class DisService:
             logger.warning("Cannot claim screen, session not READY.")
             return False
         
-        logger.info("Sending Region Claim (0x52) to switch to NAV screen...")
+        # --- Common Payloads ---
+        payload_claim = [0x52, 0x05, 0x82, 0x00, 0x1B, 0x40, 0x30]
+        payload_busy  = [0x53, 0x84]
+        payload_free  = [0x53, 0x05]
+        payload_ready = [0x2E]
+        payload_clear = [0x2F]
+        payload_ok    = [0x53, 0x85]
+            
+        # Select the correct handshake based on the connected cluster type
+        if self.ddp.dis_mode == 'red':
+            # --- Red DIS Claim Handshake (Corrected 2-Step) ---
+            logger.info("Using RED DIS (2-step) claim handshake...")
+            try:
+                # 1. Send Claim
+                if not self.ddp.send_data_packet(payload_claim):
+                    raise Exception("Claim Handshake 1/2 failed (send 1x 52)")
+                
+                # 2. Wait for OK (0x53 0x85)
+                data = self.ddp._recv_and_ack_data(1000)
+                if not self.ddp.payload_is(data, payload_ok):
+                    raise Exception(f"Claim Handshake 2/2 failed (wait 1x 53 85), got {data}")
+
+            except Exception as e:
+                logger.error(f"Failed to claim screen (RED path): {e}")
+                self.ddp.state = 'DISCONNECTED' # Force re-init
+                return False
         
-        try:
-            payload_claim = [0x52, 0x05, 0x82, 0x00, 0x1B, 0x40, 0x30]
-            payload_busy  = [0x53, 0x84]
-            payload_free  = [0x53, 0x05]
-            payload_ready = [0x2E]
-            payload_clear = [0x2F]
-            payload_ok    = [0x53, 0x85]
-            
-            if not self.ddp.send_data_packet(payload_claim):
-                raise Exception("Claim Handshake 1/7 failed (send 1x 52)")
-            
-            data = self.ddp._recv_and_ack_data(1000)
-            if not self.ddp.payload_is(data, payload_busy):
-                raise Exception(f"Claim Handshake 2/7 failed (wait 1x 53 84), got {data}")
+        else:
+            # --- White DIS Claim Handshake (Original 7-step) ---
+            logger.info("Using WHITE DIS (7-step) claim handshake...")
+            try:
+                if not self.ddp.send_data_packet(payload_claim):
+                    raise Exception("Claim Handshake 1/7 failed (send 1x 52)")
+                
+                data = self.ddp._recv_and_ack_data(1000)
+                if not self.ddp.payload_is(data, payload_busy):
+                    raise Exception(f"Claim Handshake 2/7 failed (wait 1x 53 84), got {data}")
 
-            data = self.ddp._recv_and_ack_data(1000)
-            if not self.ddp.payload_is(data, payload_free):
-                raise Exception(f"Claim Handshake 3/7 failed (wait 1x 53 05), got {data}")
-            
-            data = self.ddp._recv_and_ack_data(1000)
-            if not self.ddp.payload_is(data, payload_ready):
-                raise Exception(f"Claim Handshake 4/7 failed (wait 1x 2E), got {data}")
-            
-            if not self.ddp.send_data_packet(payload_clear):
-                raise Exception("Claim Handshake 5/7 failed (send 1x 2F)")
+                data = self.ddp._recv_and_ack_data(1000)
+                if not self.ddp.payload_is(data, payload_free):
+                    raise Exception(f"Claim Handshake 3/7 failed (wait 1x 53 05), got {data}")
+                
+                data = self.ddp._recv_and_ack_data(1000)
+                if not self.ddp.payload_is(data, payload_ready):
+                    raise Exception(f"Claim Handshake 4/7 failed (wait 1x 2E), got {data}")
+                
+                if not self.ddp.send_data_packet(payload_clear):
+                    raise Exception("Claim Handshake 5/7 failed (send 1x 2F)")
 
-            if not self.ddp.send_data_packet(payload_claim):
-                raise Exception("Claim Handshake 6/7 failed (send 1x 52 again)")
+                if not self.ddp.send_data_packet(payload_claim):
+                    raise Exception("Claim Handshake 6/7 failed (send 1x 52 again)")
 
-            data = self.ddp._recv_and_ack_data(1000)
-            if not self.ddp.payload_is(data, payload_ok):
-                logger.warning(f"Got non-standard status {data} after 2nd claim, but proceeding.")
+                data = self.ddp._recv_and_ack_data(1000)
+                if not self.ddp.payload_is(data, payload_ok):
+                    logger.warning(f"Got non-standard status {data} after 2nd claim, but proceeding.")
 
-        except Exception as e:
-            logger.error(f"Failed to claim screen: {e}")
-            self.ddp.state = 'DISCONNECTED' # Force re-init
-            return False
+            except Exception as e:
+                logger.error(f"Failed to claim screen (WHITE path): {e}")
+                self.ddp.state = 'DISCONNECTED' # Force re-init
+                return False
             
         logger.info("Region Claim handshake successful. Screen is active.")
         self.screen_is_active = True
@@ -171,6 +194,7 @@ class DisService:
     def clear_screen(self):
         """Executes a full clear screen command (Clear + Commit)."""
         logger.info("Executing full clear_screen command...")
+        # Note: This command will *also* trigger the auto-claim if needed
         payload_clear = [0x52, 0x05, 0x02, 0x00, 0x1B, 0x40, 0x30]
         payload_commit = [0x39]
         if not self.ddp.send_ddp_frame(payload_clear + payload_commit):
@@ -188,18 +212,16 @@ class DisService:
         """
         while True:
             try:
-                # STATE: DISCONNECTED
+                # --- STATE: DISCONNECTED ---
                 if self.ddp.state == 'DISCONNECTED':
-                    self.screen_is_active = False 
-                    if self.ddp.passive_open():
-                        logger.info("PASSIVE MODE: Cluster opened")
-                    elif self.ddp.active_open():
-                        logger.info("ACTIVE MODE: We opened")
+                    self.screen_is_active = False
+                    if self.ddp.detect_and_open_session():
+                        logger.info(f"Session established (Mode: {self.ddp.dis_mode}). Will proceed to initialization.")
                     else:
-                        logger.warning("No session — retrying in 3s...")
+                        logger.warning("No session detected — retrying in 3s...")
                         time.sleep(3)
-                    
-                # STATE: SESSION_ACTIVE
+                
+                # --- STATE: SESSION_ACTIVE ---
                 elif self.ddp.state == 'SESSION_ACTIVE':
                     if not self.ddp.perform_initialization():
                         logger.error("DDP Initialization failed. Retrying session.")
@@ -209,10 +231,10 @@ class DisService:
                         # Success!
                         self.set_source_radio()
                         logger.info("DDP READY. Waiting for first client command to claim screen.")
-                        self.last_draw_time = time.time() 
-                        self.screen_is_active = False 
+                        self.last_draw_time = time.time()
+                        self.screen_is_active = False
                 
-                # STATE: READY
+                # --- STATE: READY ---
                 elif self.ddp.state == 'READY':
                     # This is the "inner loop"
                     self.ddp.send_keepalive_if_needed()
@@ -222,8 +244,8 @@ class DisService:
                         logger.warning("Session closed by cluster. Re-initializing.")
                         continue # Go back to top of loop
 
-                    # ZMQ Command Parser
-                    socks = dict(self.poller.poll(5)) 
+                    # --- ZMQ Command Parser ---
+                    socks = dict(self.poller.poll(5))
                     if self.draw_socket in socks:
                         while True:
                             try:
@@ -231,16 +253,17 @@ class DisService:
                                 
                                 # Auto-Claim Feature
                                 if not self.screen_is_active:
+                                    # Any command received will trigger a screen claim if not active
                                     if not self.claim_nav_screen():
                                         logger.error("Failed to claim screen. Will retry on next command.")
-                                        break 
-                                    self.screen_is_active = True
+                                        break # Stop processing commands
+                                    # If claim was successful, screen_is_active is now True
 
                                 self.last_draw_time = time.time()
                                 c = cmd.get('command')
                                 
                                 if c == 'clear':
-                                    self.clear_screen() 
+                                    self.clear_screen()
                                 
                                 elif c == 'clear_payload':
                                     self.clear_screen_payload()
@@ -257,17 +280,17 @@ class DisService:
                                 
                             except zmq.Again:
                                 break # No more commands in queue
-                    
-                    # Auto-Release Feature (V1.3)
+                        
+                    # --- Auto-Release Feature ---
                     if self.screen_is_active and (time.time() - self.last_draw_time > self.inactivity_timeout_sec):
                         logger.info(f"Inactivity timeout ({self.inactivity_timeout_sec}s). Releasing screen to Bordcomputer.")
                         if self.ddp.release_screen(): # This sends 0x33
                             self.screen_is_active = False
                         else:
                             # Release failed, session is dead.
-                            # The driver set its state to DISCONNECTED.
                             logger.error("Failed to send release packet, forcing reconnect.")
-                            self.screen_is_active = False 
+                            self.screen_is_active = False
+                            # The DDP driver already set its state to DISCONNECTED
                 
                 time.sleep(0.01)
 
