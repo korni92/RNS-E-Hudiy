@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hudiy Data Extractor (V2.8)
+Hudiy Data Extractor (V2.9)
+- FIX: Adapted to latest Hudiy API structure (MediaSource inside MediaStatus).
+- FEATURE: Extracts Media Source (AA, CarPlay, BT) for dynamic headers.
+- FEATURE: Handles Projection Status.
 """
 
 import json
@@ -22,8 +25,6 @@ try:
     import common.Api_pb2 as hudiy_api
 except ImportError as e:
     print(f"FATAL: Could not import Hudiy client libraries: {e}")
-    print(f"Looked for 'common' module in: {api_path}")
-    print("Please ensure Client.py and Api_pb2.py are in a 'common' subfolder (e.g., /home/pi/hudiy_client/api_files/common/)")
     sys.exit(1)
 
 # --- Logging Setup ---
@@ -55,15 +56,32 @@ CONN_STATE_MAP = {
     2: 'DISCONNECTED'
 }
 
+# --- NEW: Media Source Map ---
+MEDIA_SOURCE_MAP = {
+    0: "Paused",        # MEDIA_SOURCE_NONE
+    1: "Android",       # MEDIA_SOURCE_ANDROID_AUTO (Shortened from AndroidAuto)
+    2: "CarPlay",       # MEDIA_SOURCE_AUTOBOX
+    3: "Bluetooth",     # MEDIA_SOURCE_A2DP
+    4: "Storage",       # MEDIA_SOURCE_STORAGE
+    5: "FM-Radio",      # MEDIA_SOURCE_FM_RADIO
+    6: "Web"            # MEDIA_SOURCE_WEB
+}
+
 class HudiyEventHandler(ClientEventHandler):
     def __init__(self, zmq_publisher):
-        super().__init__() # Call the parent constructor
+        super().__init__() 
         self.zmq_pub = zmq_publisher
         self.last_media = None
-        self.last_nav_details = None
-        self.last_call = None
         
-        self.current_media_data = {}
+        # Initialize Data Objects
+        self.current_media_data = {
+            'artist': '', 'title': '', 'album': '', 
+            'playing': False, 'duration': '0:00', 'position': '0:00',
+            'source_id': 0, 
+            'source_label': 'Now Playing', # Default
+            'projection_active': False,
+            'timestamp': 0
+        }
         self.current_nav_data = {}
         self.current_phone_data = {
             'connection_state': 'DISCONNECTED', 'name': '', 'state': 'IDLE', 
@@ -76,9 +94,13 @@ class HudiyEventHandler(ClientEventHandler):
         subs = hudiy_api.SetStatusSubscriptions()
         
         if client._name == "MEDIA":
-            subs.subscriptions.append(hudiy_api.SetStatusSubscriptions.Subscription.MEDIA)
+            # Subscribe to MEDIA and PROJECTION
+            subs.subscriptions.extend([
+                hudiy_api.SetStatusSubscriptions.Subscription.MEDIA,
+                hudiy_api.SetStatusSubscriptions.Subscription.PROJECTION
+            ])
             client.send(hudiy_api.MESSAGE_SET_STATUS_SUBSCRIPTIONS, 0, subs.SerializeToString())
-            logger.info(f"Client '{client._name}': Subscribed to MEDIA")
+            logger.info(f"Client '{client._name}': Subscribed to MEDIA + PROJECTION")
             
         elif client._name == "NAV_PHONE":
             subs.subscriptions.extend([
@@ -91,36 +113,50 @@ class HudiyEventHandler(ClientEventHandler):
     # --- Media Callbacks (Port 44406) ---
     
     def on_media_metadata(self, client, message):
+        # Handle Metadata (Artist, Title, Album)
         new_meta = f"{message.artist}|{message.title}|{message.album}"
-        if new_meta == self.last_media:
-            return
-        self.last_media = new_meta
-        logger.info(f"?? {message.artist} - {message.title} ({message.album})")
         
-        self.current_media_data = {
+        self.current_media_data.update({
             'artist': message.artist or '',
             'title': message.title or '',
             'album': message.album or '',
-            'playing': True,
             'duration': getattr(message, 'duration_label', '0:00'),
-            'position': '0:00',
             'timestamp': time.time()
-        }
+        })
+        
+        # Log only if changed
+        if new_meta != self.last_media:
+            self.last_media = new_meta
+            logger.info(f"?? {message.artist} - {message.title}")
+            
         self.publish_and_write_media(self.current_media_data)
 
     def on_media_status(self, client, message):
+        # Handle Status (Playing, Position, Source)
         pos = getattr(message, 'position_label', 'N/A')
-        if not message.is_playing:
-            logger.info(f"?? PAUSED - {pos}")
-            
-        # Ensure media data exists before updating
-        if not self.current_media_data:
-             self.current_media_data = {'artist': '', 'title': '', 'album': '', 'duration': '', 'position': ''}
-             
-        self.current_media_data['playing'] = message.is_playing
-        self.current_media_data['position'] = pos
-        self.current_media_data['timestamp'] = time.time()
         
+        # Extract Source (New Feature)
+        src_id = getattr(message, 'source', 0)
+        src_label = MEDIA_SOURCE_MAP.get(src_id, "Now Playing")
+        
+        if src_id != self.current_media_data.get('source_id'):
+            logger.info(f"SOURCE CHANGED: {src_label} ({src_id})")
+
+        self.current_media_data.update({
+            'playing': message.is_playing,
+            'position': pos,
+            'source_id': src_id,
+            'source_label': src_label,
+            'timestamp': time.time()
+        })
+        
+        self.publish_and_write_media(self.current_media_data)
+
+    # --- Projection Callback ---
+    def on_projection_status(self, client, message):
+        active = getattr(message, 'active', False)
+        logger.info(f"PROJECTION STATUS: {'Active' if active else 'Inactive'}")
+        self.current_media_data['projection_active'] = active
         self.publish_and_write_media(self.current_media_data)
 
     def publish_and_write_media(self, data: dict):
@@ -130,12 +166,11 @@ class HudiyEventHandler(ClientEventHandler):
                 json.dumps(data).encode('utf-8')
             ])
         except Exception as e:
-            logger.error(f"Failed to publish ZMQ media data: {e}")
+            logger.error(f"Failed to publish ZMQ media: {e}")
         try:
             with open('/tmp/now_playing.json', 'w') as f:
                 json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to write /tmp/now_playing.json: {e}")
+        except Exception: pass
 
     # --- Nav/Phone Callbacks (Port 44405) ---
     
@@ -148,25 +183,27 @@ class HudiyEventHandler(ClientEventHandler):
         side_text = MANEUVER_SIDE_MAP.get(side_num, 'N/A')
         full_maneuver_text = f"{maneuver_text} {side_text}".strip()
         
-        logger.info(f"NAV Update: desc='{desc}', type='{maneuver_text}', side='{side_text}'")
+        logger.info(f"NAV: {full_maneuver_text} - {desc}")
 
-        if not self.current_nav_data:
-            self.current_nav_data = {}
-
-        self.current_nav_data['description'] = desc
-        self.current_nav_data['maneuver_text'] = full_maneuver_text
-        self.current_nav_data['timestamp'] = time.time()
+        self.current_nav_data.update({
+            'description': desc,
+            'maneuver_text': full_maneuver_text,
+            'timestamp': time.time()
+        })
         self.publish_and_write_nav(self.current_nav_data)
 
     def on_navigation_maneuver_distance(self, client, message):
         dist = getattr(message, 'label', '')
-        
-        if not self.current_nav_data:
-            self.current_nav_data = {}
-            
         self.current_nav_data['distance'] = dist
         self.current_nav_data['timestamp'] = time.time()
-        logger.info(f"NAV DIST: {dist}")
+        self.publish_and_write_nav(self.current_nav_data)
+
+    def on_navigation_status(self, client, message):
+        # Handle active/inactive state
+        # 1=Active, 2=Inactive
+        state = getattr(message, 'state', 2) 
+        logger.info(f"NAV STATE: {'Active' if state == 1 else 'Inactive'}")
+        self.current_nav_data['active'] = (state == 1)
         self.publish_and_write_nav(self.current_nav_data)
 
     def publish_and_write_nav(self, data: dict):
@@ -175,52 +212,49 @@ class HudiyEventHandler(ClientEventHandler):
                 b'HUDIY_NAV',
                 json.dumps(data).encode('utf-8')
             ])
-        except Exception as e:
-            logger.error(f"Failed to publish ZMQ nav data: {e}")
+        except Exception: pass
         try:
             with open('/tmp/current_nav.json', 'w') as f:
                 json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to write /tmp/current_nav.json: {e}")
+        except Exception: pass
     
     # --- Phone Handlers ---
     
     def on_phone_connection_status(self, client, message):
         state = CONN_STATE_MAP.get(message.state, 'DISCONNECTED')
         name = getattr(message, 'name', '')
-        logger.info(f"?? PHONE CONN: {state}: {name}")
+        logger.info(f"PHONE CONN: {state}: {name}")
         
-        self.current_phone_data['connection_state'] = state
-        self.current_phone_data['name'] = name
-        self.current_phone_data['timestamp'] = time.time()
+        self.current_phone_data.update({
+            'connection_state': state,
+            'name': name,
+            'timestamp': time.time()
+        })
         self.publish_and_write_phone(self.current_phone_data)
 
     def on_phone_levels_status(self, client, message):
         battery = getattr(message, 'bettery_level', 0)
         signal = getattr(message, 'signal_level', 0)
-        logger.info(f"?? PHONE LVL: Bat={battery}/5, Sig={signal}%")
         
-        self.current_phone_data['battery'] = battery
-        self.current_phone_data['signal'] = signal
-        self.current_phone_data['timestamp'] = time.time()
+        self.current_phone_data.update({
+            'battery': battery,
+            'signal': signal,
+            'timestamp': time.time()
+        })
         self.publish_and_write_phone(self.current_phone_data)
 
     def on_phone_voice_call_status(self, client, message):
         state = CALL_STATE_MAP.get(message.state, 'IDLE')
-        caller_name = getattr(message, 'caller_name', '')
-        caller_id = getattr(message, 'caller_id', '')
-        caller = caller_name or caller_id or 'Unknown'
+        caller = getattr(message, 'caller_name', '') or getattr(message, 'caller_id', '') or 'Unknown'
+        
+        logger.info(f"PHONE CALL: {state}: {caller}")
 
-        new_call = f"{state}|{caller}"
-        if new_call == self.last_call:
-            return
-        self.last_call = new_call
-        logger.info(f"?? PHONE CALL: {state}: {caller}")
-
-        self.current_phone_data['state'] = state
-        self.current_phone_data['caller_name'] = caller_name
-        self.current_phone_data['caller_id'] = caller_id
-        self.current_phone_data['timestamp'] = time.time()
+        self.current_phone_data.update({
+            'state': state,
+            'caller_name': getattr(message, 'caller_name', ''),
+            'caller_id': getattr(message, 'caller_id', ''),
+            'timestamp': time.time()
+        })
         self.publish_and_write_phone(self.current_phone_data)
 
     def publish_and_write_phone(self, data: dict):
@@ -229,13 +263,11 @@ class HudiyEventHandler(ClientEventHandler):
                 b'HUDIY_PHONE',
                 json.dumps(data).encode('utf-8')
             ])
-        except Exception as e:
-            logger.error(f"Failed to publish ZMQ phone data: {e}")
+        except Exception: pass
         try:
             with open('/tmp/current_call.json', 'w') as f:
                 json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to write /tmp/current_call.json: {e}")
+        except Exception: pass
 
 class HudiyData:
     def __init__(self, config_path='/home/pi/config.json'):
@@ -245,8 +277,7 @@ class HudiyData:
                 config = json.load(f)
             zmq_addr = config['zmq']['hudiy_publish_address']
         except Exception as e:
-            logger.warning(f"Could not load config.json: {e}")
-            logger.warning("Using default address: ipc:///run/rnse_control/hudiy_stream.ipc")
+            logger.warning(f"Config Error: {e}. Using default ZMQ address.")
             zmq_addr = "ipc:///run/rnse_control/hudiy_stream.ipc"
         
         # --- ZMQ PUB SOCKET ---
@@ -256,7 +287,6 @@ class HudiyData:
             self.zmq_publisher.bind(zmq_addr)
         except zmq.ZMQError as e:
             logger.critical(f"FATAL: Could not bind ZMQ PUB socket: {e}")
-            logger.critical("Check if another service is using the address.")
             sys.exit(1)
         
         self.handler = HudiyEventHandler(self.zmq_publisher)
@@ -274,17 +304,14 @@ class HudiyData:
                 logger.info("MEDIA Thread ACTIVE")
                 while self.media_client._connected and self.running:
                     if not self.media_client.wait_for_message():
-                        break # Connection closed
+                        break 
             except Exception as e:
                 logger.error(f"MEDIA Thread: {e}")
             
-            if self.media_client:
-                self.media_client.disconnect()
-                
+            if self.media_client: self.media_client.disconnect()
             if self.running:
                 logger.info("MEDIA Reconnecting in 5s...")
                 time.sleep(5)
-        logger.info("MEDIA thread finished.")
     
     def connect_nav(self):
         """Thread: Nav+Phone TCP"""
@@ -296,17 +323,14 @@ class HudiyData:
                 logger.info("NAV_THREAD ACTIVE")
                 while self.nav_client._connected and self.running:
                     if not self.nav_client.wait_for_message():
-                        break # Connection closed
+                        break 
             except Exception as e:
                 logger.error(f"NAV Thread: {e}")
                 
-            if self.nav_client:
-                self.nav_client.disconnect()
-                
+            if self.nav_client: self.nav_client.disconnect()
             if self.running:
                 logger.info("NAV Reconnecting in 5s...")
                 time.sleep(5)
-        logger.info("NAV_PHONE thread finished.")
     
     def run(self):
         logger.info("THREADING Hudiy Data ACTIVE!")
