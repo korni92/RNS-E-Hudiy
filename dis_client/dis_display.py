@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# DIS Menu System V4.3 - Car Info & Settings
 import zmq, json, time, logging, sys
 from typing import Set
 
