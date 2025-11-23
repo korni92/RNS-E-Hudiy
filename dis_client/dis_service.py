@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# Audi DIS (Cluster) DDP Service - V2.18
+# Audi DIS (Cluster) DDP Service - V2.20 (Dumb Pipe Fix)
 #
-# Changes in V2.18:
-# - STRATEGY: "Aggressive Space Eraser" (Simplicity & Stability)
-# - REMOVED [0xD7] terminator completely (Source of packet splitting bugs).
-# - REMOVED [0x52] Clear commands (Source of "One Line" window bugs).
-# - ADDED Full Line Padding: Every text string is forcibly padded with spaces
-#   to exactly 16 characters (approx screen width).
-#   In Opaque Mode, these spaces paint black pixels over the old text,
-#   fixing ghosting without using ANY special protocol commands.
-# - SAFETY: Kept 0.1s Pacing (10 FPS) to prevent White DIS High-Res buffer overflow.
+# - FIX: Removed "Aggressive Padding". Now trusts the upper layer for length.
+# - FIX: write_text now accepts and uses the 'flags' parameter.
+# - RESULT: Upper layer (dis_display) can now control Fixed Width (0x02) vs Compact (0x06).
 #
 import zmq
 import json
@@ -74,6 +68,11 @@ class DisService:
         self.screen_is_active = False
         self.inactivity_timeout_sec = 30.0 
 
+        self.ENABLE_INACTIVITY_RELEASE = False   # True = auto-release after 30s, False = never release (recommended for nav)
+
+        if not self.ENABLE_INACTIVITY_RELEASE:
+            logger.info("Inactivity auto-release is DISABLED (screen will stay claimed forever)")
+
     def parse_time(self, t: str) -> int:
         """Helper to parse "M:SS" time strings to seconds."""
         if not t: return 0
@@ -84,15 +83,14 @@ class DisService:
         """Translates a standard Python string into a list of AUDSCII bytes."""
         return [audscii_trans[ord(c) % 256] for c in text]
 
-    # --- Application Logic Functions (Payload Generation) ---
-
+    # Application Logic Functions (Payload Generation)
     def claim_nav_screen(self):
         """Performs the full "Claim Screen" handshake."""
         if self.ddp.state != DDPState.READY:
             logger.warning("Cannot claim screen, session not READY.")
             return False
         
-        # --- Common Payloads ---
+        # Common Payloads
         payload_claim = [0x52, 0x05, 0x82, 0x00, 0x1B, 0x40, 0x30]
         payload_busy  = [0x53, 0x84]
         payload_free  = [0x53, 0x05]
@@ -101,35 +99,29 @@ class DisService:
         payload_ok    = [0x53, 0x85]
             
         if self.ddp.dis_mode == DisMode.RED:
-            # --- Red DIS Claim Handshake (2-Step) ---
-            logger.info("Using RED DIS (2-step) claim handshake...")
+            #Red DIS Claim Handshake (2-Step)
             try:
                 self.ddp.send_data_packet(payload_claim)
-                
                 data = self.ddp._recv_and_ack_data(1000)
                 if not self.ddp.payload_is(data, payload_ok):
                     raise DDPHandshakeError(f"Claim Handshake 2/2 failed (wait 1x 53 85), got {data}")
-            
             except DDPError as e:
                 logger.error(f"Failed to claim screen (RED path): {e}")
                 return False
         
         else:
-            # --- White DIS Claim Handshake ---
-            logger.info("Using WHITE DIS claim handshake...")
+            # White DIS Claim Handshake
             try:
                 self.ddp.send_data_packet(payload_claim)
-                
                 data = self.ddp._recv_and_ack_data(1000)
 
-                # Fast Path (Resume after Pause)
+                # Fast Path
                 if self.ddp.payload_is(data, payload_ok):
-                    logger.info("Claim accepted IMMEDIATELY (Fast Path). Screen is active.")
                     self.screen_is_active = True
                     self.last_draw_time = time.time()
                     return True
 
-                # Standard 7-Step Path
+                # Standard Path
                 if not self.ddp.payload_is(data, payload_busy):
                     raise DDPHandshakeError(f"Claim Handshake 2/7 failed (wait 1x 53 84), got {data}")
 
@@ -164,32 +156,19 @@ class DisService:
         if not self.ddp.send_ddp_frame(payload):
             logger.error("Failed to send clear payload.")
 
-    def write_text(self, text: str, x: int = 0, y: int = 0):
-        """Queues a 'Write Text' command (0x57)."""
-        # logger.info(f"Queueing text '{text}'")
+    def write_text(self, text: str, x: int, y: int, flags: int = 0x06):
+        """
+        Queues a 'Write Text' command (0x57).
         
+        CRITICAL UPDATE:
+        - Removed 'Aggressive Padding'. We trust the upper layer to handle length.
+        - Now applies the 'flags' argument passed from the display manager.
+        """
         chars = self.translate_to_audscii(text) 
         
-        # --- AGGRESSIVE PADDING (The "Manual Eraser") ---
-        # pad EVERY string to exactly 16 characters (or fit to screen).
-        # This forces the cluster to draw Black Boxes (Space 0x20 in Opaque Mode)
-        # over any old pixels, fixing ghosting without special commands.
-        
-        MAX_CHARS = 16 # Fits safely in one or two blocks
-        
-        if len(chars) < MAX_CHARS:
-            # Add spaces to fill the line
-            padding = MAX_CHARS - len(chars)
-            chars.extend([0x20] * padding) # 0x20 is AUDSCII Space
-        elif len(chars) > MAX_CHARS:
-            # Truncate if too long (to keep packet size safe)
-            chars = chars[:MAX_CHARS]
-
         # 0x57 = Text Opcode
         # Len = chars + 3 (Flags, X, Y)
-        # Flags = 0x06 (Compact Font, Normal Output, OPAQUE MODE)
-        # Opaque mode is required for the spaces to act as an eraser.
-        payload = [0x57, len(chars) + 3, 0x06, x, y] + chars
+        payload = [0x57, len(chars) + 3, flags, x, y] + chars
         
         if not self.ddp.send_ddp_frame(payload):
             logger.error("Failed to send text payload.")
@@ -214,7 +193,6 @@ class DisService:
 
     def commit_frame(self):
         """Queues a 'Commit' command (0x39) to draw the frame."""
-        # logger.info("Committing Frame (0x39)")
         payload = [0x39]
         if not self.ddp.send_ddp_frame(payload):
              logger.error("Failed to send commit packet.")
@@ -307,7 +285,13 @@ class DisService:
                                 elif c == 'clear_payload':
                                     self.clear_screen_payload()
                                 elif c == 'draw_text':
-                                    self.write_text(cmd.get('text', ''), cmd.get('x', 0), cmd.get('y', 0))
+                                    # FIX: Pass the 'flags' parameter from the ZMQ command
+                                    self.write_text(
+                                        cmd.get('text', ''), 
+                                        cmd.get('x', 0), 
+                                        cmd.get('y', 0),
+                                        cmd.get('flags', 0x06) # Default to 0x06 if missing
+                                    )
                                 elif c == 'draw_bitmap':
                                     self.draw_bitmap(cmd.get('x', 0), cmd.get('y', 0), cmd.get('icon_name'))
                                 elif c == 'commit':
@@ -316,9 +300,14 @@ class DisService:
                             except zmq.Again:
                                 break 
                         
-                    # Auto-Release
-                    if self.screen_is_active and (time.time() - self.last_draw_time > self.inactivity_timeout_sec):
+                    if (self.ENABLE_INACTIVITY_RELEASE
+                        and self.screen_is_active
+                        and (time.time() - self.last_draw_time > self.inactivity_timeout_sec)):
+                        
+                        # Auto-Release logic
                         logger.info("Inactivity timeout. Releasing screen.")
+                        
+                        # Ensure this 'if' is aligned vertically with 'logger' above it
                         if self.ddp.release_screen():
                             self.screen_is_active = False
                         else:
