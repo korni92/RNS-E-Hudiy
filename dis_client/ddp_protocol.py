@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# Audi DIS (Cluster) DDP Protocol Driver - V2.6
+# Audi DIS (Cluster) DDP Protocol Driver - V2.7
 #
-# Changes in V2.6:
-# - ADDED Inter-Block Pacing: Implemented a 20ms delay after every successful
-#   block ACK for White DIS clusters. This mimics RNS-E behavior ("piece by piece")
-#   and prevents buffer overruns when sending rapid updates (scrolling) or
-#   large payloads (bitmaps) that span multiple blocks.
+# Changes in V2.7:
+# - FIX: Added handler for White DIS "Graphics ACK" packet [0x0B, 0x03, 0x57].
 #
 import time
 import logging
@@ -67,6 +64,9 @@ class DDPMessages:
     STAT_FREE_HALF       = [0x53, 0x05]
     STAT_FREE_FULL       = [0x53, 0x0A]
 
+    # White DIS specific Graphics Acknowledgment (Benign)
+    STAT_GRAPHIC_ACK     = [0x0B, 0x03, 0x57]
+
     # Re-Initialization Request (Sent by Cluster)
     CMD_REINIT_REQ       = [0x2E] 
     # Re-Initialization Confirmation (We send this back)
@@ -102,7 +102,8 @@ class DDPProtocol:
     PKT_TYPE_DATA_BODY = 0x20 # 0x2x (frame body, no ACK)
     PKT_TYPE_ACK = 0xB0       # 0xBx (ACK)
     
-    # -- Block Limits -- Thanks to domnulvlad fot the help with this
+    # -- Block Limits --
+    # Vlad's Limit: Clusters corrupt data if >6 frames (42 bytes) are sent without ACK.
     MAX_BYTES_PER_BLOCK = 42
 
     def __init__(self, config: dict):
@@ -738,7 +739,7 @@ class DDPProtocol:
             msg_seq = data[0] & self.PKT_SEQ_MASK
             payload = data[1:]
 
-            # ALWAYS ACK data packets (Type 0x00 or 0x10) immediately,
+            # We must ALWAYS ACK data packets (Type 0x00 or 0x10) immediately,
             # regardless of whether we handle the content.
             if msg_type in [0x00, self.PKT_TYPE_DATA_END]:
                 self.send_ack(msg_seq)
@@ -772,6 +773,10 @@ class DDPProtocol:
                 # CRITICAL FIX: Do NOT go to SESSION_ACTIVE. We are technically still
                 # initialized, we just need to claim the screen again.
                 self._set_state(DDPState.READY)
+
+            # --- HANDLE WHITE DIS GRAPHICS ACK (BENIGN) ---
+            elif payload == DDPMessages.STAT_GRAPHIC_ACK:
+                logger.debug("Cluster confirmed graphics update (0B 03 57). Ignoring.")
 
             else:
                 logger.warning(f"Received unexpected data packet: {data}. (ACK sent).")
