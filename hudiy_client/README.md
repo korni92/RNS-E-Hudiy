@@ -42,12 +42,14 @@ mkdir api_files
 
 ## Step 5: Download and Generate Protobuf
 Download the protobuf definition Api.proto(from Hudiy GitHub):
+
 ```bash
 mkdir -p api/files/common
 cd api_files/common
-wget https://raw.githubusercontent.com/wiboma/hudiy/main/api/Api.proto
+wget https://raw.githubusercontent.com/wiboma/hudiy/main/api/Api.proto \
+# curl as alternative
+  || curl -L -o Api.proto https://raw.githubusercontent.com/wiboma/hudiy/main/api/Api.proto
 protoc --python_out=. Api.proto
-cd ..
 ```
 This generates `Api_pb2.py`.
 
