@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DIS Bitmap Tool V2 (Smart)</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background: #eef2f5; color: #333; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        
+        h2 { margin-top: 0; color: #2c3e50; }
+        .row { display: flex; gap: 30px; margin-bottom: 20px; align-items: flex-start; }
+        .col { flex: 1; }
+        .col-small { flex: 0 0 300px; }
+        
+        canvas { border: 1px solid #ccc; image-rendering: pixelated; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        textarea { width: 100%; font-family: 'Consolas', 'Monaco', monospace; font-size: 12px; border: 1px solid #ccc; padding: 10px; box-sizing: border-box; border-radius: 4px; background: #f8f9fa; }
+        
+        label { font-weight: 600; display: block; margin-bottom: 8px; margin-top: 15px; font-size: 0.9rem; color: #555;}
+        input[type="file"] { margin-bottom: 10px; }
+        input[type="text"], input[type="number"] { width: 100%; padding: 8px; margin-bottom: 10px; box-sizing: border-box; border: 1px solid #ddd; border-radius: 4px; }
+        
+        /* Range Slider */
+        input[type=range] { width: 100%; }
+        
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; transition: background 0.2s; }
+        button:hover { background: #0056b3; }
+        button.secondary { background: #6c757d; }
+        button.secondary:hover { background: #545b62; }
+        button.success { background: #28a745; }
+        button.success:hover { background: #218838; }
+
+        .preview-box { text-align: center; background: #f1f3f5; padding: 15px; border-radius: 8px; }
+        
+        .dis-preview {
+            background-color: #000;
+            display: inline-block;
+            border: 4px solid #333;
+            padding: 10px;
+            border-radius: 2px;
+        }
+        
+        .info-tag {
+            display: inline-block;
+            background: #e2e6ea;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            margin-left: 10px;
+            color: #495057;
+            font-family: monospace;
+        }
+
+        hr { border: 0; border-top: 1px solid #e9ecef; margin: 30px 0; }
+        
+        .section-title { 
+            font-size: 1.1em; 
+            font-weight: 700; 
+            color: #007bff; 
+            text-transform: uppercase; 
+            letter-spacing: 0.5px;
+            border-bottom: 2px solid #e9ecef; 
+            padding-bottom: 10px; 
+            margin-bottom: 20px; 
+        }
+        
+        .helper-text { font-size: 0.85em; color: #666; margin-top: -5px; margin-bottom: 10px; display: block;}
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>DIS Bitmap Converter V2</h2>
+    
+    <div class="section-title">1. Image to Python Dictionary</div>
+    <div class="row">
+        <div class="col">
+            <label>Select Image <span id="dimTag" class="info-tag">0 x 0</span></label>
+            <input type="file" id="fileInput" accept="image/*">
+            
+            <label>Icon Variable Name</label>
+            <input type="text" id="iconName" value="NEW_ICON" oninput="processImage()">
+            
+            <label>Black Threshold (0-255) <span id="threshVal" class="info-tag">128</span></label>
+            <span class="helper-text">Adjust until the red preview looks correct.</span>
+            <input type="range" id="threshold" min="0" max="255" value="128" oninput="processImage()">
+        </div>
+        
+        <div class="col-small preview-box">
+            <label>DIS Preview (Actual Pixels)</label>
+            <div class="dis-preview">
+                <canvas id="previewCanvas"></canvas>
+            </div>
+            <div style="margin-top:5px; font-size: 0.8em; color: #666;">Red = Active Pixel (1)</div>
+        </div>
+    </div>
+
+    <label>Generated Python Code (Copy into icons.py)</label>
+    <textarea id="outputCode" style="height: 180px;" readonly></textarea>
+    <button class="success" onclick="copyCode()">Copy Code</button>
+
+    <hr>
+
+    <div class="section-title">2. Python Code to Image Viewer</div>
+    <div class="row">
+        <div class="col">
+            <label>Paste Python Dictionary or Data List</label>
+            <span class="helper-text">Paste full object e.g., <code>STRAIGHT = {'w':31, 'h':37, 'data':[...]}</code></span>
+            <textarea id="inputData" style="height: 120px;" placeholder="STRAIGHT = { 'w': 31, 'h': 37, 'data': [0x00, 0x03, ...] }"></textarea>
+            
+            <div style="display: flex; gap: 15px;">
+                <div style="flex: 1;">
+                    <label>Width</label>
+                    <input type="number" id="viewWidth" value="31">
+                </div>
+                <div style="flex: 1;">
+                    <label>Height</label>
+                    <input type="number" id="viewHeight" value="37">
+                </div>
+            </div>
+            
+            <button onclick="visualizeCode()">Visualize Bitmap</button>
+        </div>
+        
+        <div class="col-small preview-box">
+            <label>Visualization</label>
+            <div class="dis-preview">
+                <canvas id="viewCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // --- PART 1: Image to Code ---
+    let originalImage = null;
+
+    document.getElementById('fileInput').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(event) {
+            const img = new Image();
+            img.onload = function() {
+                originalImage = img;
+                document.getElementById('dimTag').innerText = `${img.width} x ${img.height}`;
+                processImage();
+            };
+            img.src = event.target.result;
+        };
+        reader.readAsDataURL(file);
+    });
+
+    function processImage() {
+        if (!originalImage) return;
+
+        const width = originalImage.width;
+        const height = originalImage.height;
+        const name = document.getElementById('iconName').value.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+        const threshold = parseInt(document.getElementById('threshold').value);
+        document.getElementById('threshVal').innerText = threshold;
+
+        // 1. Analyze Pixels
+        const hiddenCanvas = document.createElement('canvas');
+        hiddenCanvas.width = width;
+        hiddenCanvas.height = height;
+        const ctx = hiddenCanvas.getContext('2d');
+        
+        // Draw white background then image (handles transparency)
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(originalImage, 0, 0, width, height);
+
+        const imgData = ctx.getImageData(0, 0, width, height).data;
+
+        // 2. Setup Preview Canvas (Scale 4x for visibility)
+        const scale = 4;
+        const previewCanvas = document.getElementById('previewCanvas');
+        previewCanvas.width = width * scale;
+        previewCanvas.height = height * scale;
+        const pCtx = previewCanvas.getContext('2d');
+        
+        // Default Background (Black/Off)
+        pCtx.fillStyle = '#000000'; 
+        pCtx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+
+        // 3. Generate Bytes
+        const allBytes = [];
+        
+        // Logic matches dis_service.py: bytes_per_row = (w + 7) // 8
+        const bytesPerRow = Math.ceil(width / 8);
+
+        for (let y = 0; y < height; y++) {
+            let rowBits = "";
+            
+            for (let x = 0; x < width; x++) {
+                const i = (y * width + x) * 4;
+                // Simple grayscale conversion
+                const avg = (imgData[i] + imgData[i+1] + imgData[i+2]) / 3;
+                const isPixelOn = avg < threshold; // Darker than threshold = ON (Red)
+
+                rowBits += isPixelOn ? "1" : "0";
+
+                if (isPixelOn) {
+                    pCtx.fillStyle = '#ff0000'; // DIS Red
+                    pCtx.fillRect(x * scale, y * scale, scale, scale);
+                }
+            }
+
+            // Pad the row to byte boundary
+            while (rowBits.length < bytesPerRow * 8) {
+                rowBits += "0"; 
+            }
+
+            // Convert row bits to hex bytes
+            for (let j = 0; j < rowBits.length; j += 8) {
+                const byteStr = rowBits.substring(j, j+8);
+                const byteVal = parseInt(byteStr, 2);
+                allBytes.push("0x" + byteVal.toString(16).toUpperCase().padStart(2, '0'));
+            }
+        }
+
+        // 4. Format Output Code
+        let code = `# ${name} (${width}x${height})\n${name} = {\n    'w': ${width}, 'h': ${height},\n    'data': [`;
+        
+        for (let i = 0; i < allBytes.length; i++) {
+            if (i % 12 === 0) {
+                code += "\n        ";
+            }
+            code += allBytes[i];
+            if (i < allBytes.length - 1) {
+                code += ", ";
+            }
+        }
+
+        code += "\n    ]\n}";
+        document.getElementById('outputCode').value = code;
+    }
+
+    function copyCode() {
+        const el = document.getElementById("outputCode");
+        el.select();
+        document.execCommand("copy");
+    }
+
+    // --- PART 2: Code to Image ---
+    function visualizeCode() {
+        let rawInput = document.getElementById('inputData').value;
+        let width = parseInt(document.getElementById('viewWidth').value);
+        let height = parseInt(document.getElementById('viewHeight').value);
+        
+        if (!rawInput) { alert("Please paste code."); return; }
+
+        // --- SMART PARSE (Extract w/h from Dict) ---
+        // Look for 'w': 123
+        const matchW = rawInput.match(/['"]?w['"]?\s*:\s*(\d+)/);
+        const matchH = rawInput.match(/['"]?h['"]?\s*:\s*(\d+)/);
+        
+        if (matchW) {
+            width = parseInt(matchW[1]);
+            document.getElementById('viewWidth').value = width;
+        }
+        if (matchH) {
+            height = parseInt(matchH[1]);
+            document.getElementById('viewHeight').value = height;
+        }
+
+        // Extract Data Array: Look for content between brackets [ ... ]
+        // We use a regex that finds the last array in case user pasted "data': [...]"
+        const arrayMatch = rawInput.match(/\[(.*)\]/s); // s flag allows dot to match newlines
+        if (arrayMatch) {
+            rawInput = arrayMatch[1];
+        }
+
+        // Parse Hex Bytes
+        const bytes = rawInput.match(/0x[0-9A-Fa-f]{1,2}|[0-9]{1,3}/g);
+        if (!bytes) {
+            alert("No data found.");
+            return;
+        }
+        const data = bytes.map(b => {
+             return b.startsWith('0x') ? parseInt(b, 16) : parseInt(b, 10);
+        });
+
+        // --- DRAW ---
+        const scale = 4;
+        const viewCanvas = document.getElementById('viewCanvas');
+        viewCanvas.width = width * scale;
+        viewCanvas.height = height * scale;
+        const ctx = viewCanvas.getContext('2d');
+
+        // Reset (Black)
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, viewCanvas.width, viewCanvas.height);
+        ctx.fillStyle = '#ff0000';
+
+        // Same logic as dis_service.py: (w+7)//8
+        const bytesPerRow = Math.ceil(width / 8);
+        let byteIndex = 0;
+
+        for (let y = 0; y < height; y++) {
+            let currentX = 0;
+            // Iterate strictly by the calculated bytes per row
+            for (let b = 0; b < bytesPerRow; b++) {
+                if (byteIndex >= data.length) break;
+                
+                const byteVal = data[byteIndex++];
+                
+                // Read bits MSB first
+                for (let bit = 7; bit >= 0; bit--) {
+                    if (currentX >= width) break; // Don't draw padding bits
+                    
+                    if ((byteVal >> bit) & 1) {
+                        ctx.fillRect(currentX * scale, y * scale, scale, scale);
+                    }
+                    currentX++;
+                }
+            }
+        }
+    }
+</script>
+
+</body>
+</html>
