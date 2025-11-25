@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# Audi DIS (Cluster) DDP Protocol Driver - V2.7
+# Audi DIS (Cluster) DDP Protocol Driver - V2.8
 #
-# Changes in V2.7:
-# - FIX: Added handler for White DIS "Graphics ACK" packet [0x0B, 0x03, 0x57].
+# Changes in V2.8:
+# - FIX: Added handler for Red DIS "Graphics ACK" packet [0x0B, 0x01, 0x00].
+#   This suppresses the "Received unexpected data packet" warning on Red Clusters.
 #
 import time
 import logging
@@ -64,8 +65,9 @@ class DDPMessages:
     STAT_FREE_HALF       = [0x53, 0x05]
     STAT_FREE_FULL       = [0x53, 0x0A]
 
-    # White DIS specific Graphics Acknowledgment (Benign)
-    STAT_GRAPHIC_ACK     = [0x0B, 0x03, 0x57]
+    # Graphics Acknowledgments (Benign)
+    STAT_GRAPHIC_ACK_WHITE = [0x0B, 0x03, 0x57]
+    STAT_GRAPHIC_ACK_RED   = [0x0B, 0x01, 0x00]
 
     # Re-Initialization Request (Sent by Cluster)
     CMD_REINIT_REQ       = [0x2E] 
@@ -774,9 +776,9 @@ class DDPProtocol:
                 # initialized, we just need to claim the screen again.
                 self._set_state(DDPState.READY)
 
-            # --- HANDLE WHITE DIS GRAPHICS ACK (BENIGN) ---
-            elif payload == DDPMessages.STAT_GRAPHIC_ACK:
-                logger.debug("Cluster confirmed graphics update (0B 03 57). Ignoring.")
+            # --- HANDLE GRAPHICS ACKS (BENIGN) ---
+            elif payload == DDPMessages.STAT_GRAPHIC_ACK_WHITE or payload == DDPMessages.STAT_GRAPHIC_ACK_RED:
+                logger.debug(f"Cluster confirmed graphics update ({payload}). Ignoring.")
 
             else:
                 logger.warning(f"Received unexpected data packet: {data}. (ACK sent).")
