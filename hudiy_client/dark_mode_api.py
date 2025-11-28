@@ -47,6 +47,7 @@ def send_dark_mode(enabled, max_retries=3):
     Connects to Hudiy and sends the dark mode command.
     'enabled=True' means Dark Mode (Night).
     'enabled=False' means Light Mode (Day).
+    Returns True if successful, False if failed.
     """
     mode_str = '🌙 Dark (night)' if enabled else '☀️ Light (day)'
     for attempt in range(max_retries):
@@ -76,11 +77,13 @@ def send_dark_mode(enabled, max_retries=3):
             return True
             
         except Exception as e:
-            logger.warning(f"Failed to set {mode_str} mode (Attempt {attempt + 1}/{max_retries}): {e}")
+            # Only log detailed warning on the last retry to keep logs clean during startup
+            if attempt == max_retries - 1:
+                logger.warning(f"Failed to set {mode_str} mode: {e}")
             if attempt < max_retries - 1:
                 time.sleep(0.5)
                 continue
-    logger.error(f"API call failed after {max_retries} retries.")
+                
     return False
 
 # --- Config Loading Function ---
@@ -91,14 +94,14 @@ def load_config(config_path='/home/pi/config.json'):
         with open(config_path, 'r') as f:
             config_data = json.load(f)
         
-        # Use .get() to avoid crashes if keys are missing
         config = {
             'zmq_publish_address': config_data.get('zmq', {}).get('publish_address'),
             'light_status_can_id': config_data.get('can_ids', {}).get('light_status'),
             'day_night_mode': config_data.get('features', {}).get('day_night_mode', False),
+            # NEW: Read initial mode preference, default to 'night' if missing
+            'initial_mode': config_data.get('features', {}).get('initial_mode', 'night')
         }
 
-        # Check for critical missing values
         if not config['zmq_publish_address']:
             logger.critical("FATAL: 'zmq_publish_address' not found in config.json.")
             return None
@@ -115,23 +118,33 @@ def load_config(config_path='/home/pi/config.json'):
 # --- Main Service Loop ---
 def main():
     """Main service loop."""
-    # Create log directory if it doesn't exist
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
             
     config = load_config()
     if not config:
         sys.exit(1)
 
-    # Check for feature flag
     if not config.get('day_night_mode'):
         logger.info("Day/Night mode feature is disabled in config.json. Exiting.")
         sys.exit(0)
     
-    logger.info("Day/Night mode feature is enabled.") 
+    # --- 1. Handle Initial Mode ---
+    initial_mode_str = config.get('initial_mode', 'night').lower()
+    is_initial_night = (initial_mode_str == 'night')
+    
+    logger.info(f"Day/Night feature enabled. Default startup mode: {initial_mode_str}")
 
-    # --- ZMQ Connection ---
+    # Try to set the initial mode immediately (Best Effort)
+    # We use 1 retry so we don't block startup too long if API is down
+    send_dark_mode(enabled=is_initial_night, max_retries=1)
+
+    # Initialize internal state to match the configured initial mode
+    # 1 = Night, 0 = Day
+    light_status = 1 if is_initial_night else 0
+    last_msg_data = None
+
+    # --- 2. ZMQ Connection ---
     zmq_address = config['zmq_publish_address']
-    # Convert "0x635" string from config to "635"
     can_id_str = config['light_status_can_id'].replace('0x', '').upper()
     can_topic = f"CAN_{can_id_str}"
     
@@ -147,9 +160,6 @@ def main():
         
     socket.setsockopt_string(zmq.SUBSCRIBE, can_topic)
     logger.info(f"Subscribed to ZMQ topic: {can_topic}")
-    light_status = 1 
-    last_msg_data = None
-
     logger.info("Day/Night service started. Waiting for CAN messages...")
 
     while True:
@@ -159,12 +169,16 @@ def main():
             data_hex = msg_data.get('data_hex')
 
             if not data_hex:
-                logger.warning("Received message with no data_hex.")
                 continue
 
+            # --- Logic Change: How we detect if we need to send ---
+            # We want to send if:
+            # A) This is the very first valid message we've seen (first_message)
+            # OR
+            # B) The CAN data has physically changed (data_hex != last_msg_data)
+            
             first_message = last_msg_data is None
 
-            # Check 1: Only process if the CAN message data has changed
             if first_message or data_hex != last_msg_data:
                 
                 try:
@@ -174,22 +188,34 @@ def main():
                     logger.error(f"Could not parse light value from data_hex '{data_hex}'. Error: {e}")
                     continue
 
-                # 1 = night (dark mode on), 0 = day (dark mode off)
+                # Calculate what the mode SHOULD be based on this message
+                # 1 = night (lights on), 0 = day (lights off)
                 new_light_status = 1 if light_value > 0 else 0
 
-                # Check 2: Only send API call if the *calculated state* has changed
+                # Check if we need to trigger an API update
+                # We update if it's the first message OR if the status is different from what we currently have
                 if first_message or (new_light_status != light_status):
                     
                     is_dark_mode_enabled = (new_light_status == 1) 
                     mode_str = 'night' if is_dark_mode_enabled else 'day'
-                    logger.info(f"State change detected (CAN Value: {light_value}). Desired mode: {mode_str}.")
                     
-                    logger.info("Sending API command.")
-                    send_dark_mode(is_dark_mode_enabled)
-
-                # Update state of whether the API was called
-                light_status = new_light_status
-                last_msg_data = data_hex
+                    logger.info(f"State change required (CAN Value: {light_value}). Target: {mode_str}.")
+                    
+                    # --- CRITICAL FIX ---
+                    # Only update our internal state (light_status/last_msg_data) IF the API call succeeds.
+                    # If it fails (returns False), we keep last_msg_data as None/Old.
+                    # This forces the loop to try again on the very next CAN message received.
+                    if send_dark_mode(is_dark_mode_enabled):
+                        light_status = new_light_status
+                        last_msg_data = data_hex
+                        logger.info("State updated successfully.")
+                    else:
+                        logger.warning("API call failed. Will retry on next CAN message.")
+                        # Do NOT update last_msg_data. 
+                        # This ensures 'data_hex != last_msg_data' remains True for the next loop.
+                else:
+                    # Status hasn't changed, just update the data tracker
+                    last_msg_data = data_hex
 
         except zmq.ZMQError as e:
             if e.errno == zmq.ETERM:
