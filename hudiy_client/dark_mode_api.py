@@ -30,13 +30,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Add API Files Path ---
-api_path = os.path.dirname(os.path.abspath(__file__)) + '/api_files'
+# --- Add API Files Path (UPDATED FOR NEW API STRUCTURE) ---
+api_path = os.path.dirname(os.path.abspath(__file__)) + '/api_files/common'
 sys.path.insert(0, api_path)
 try:
-    from hudiy_api_pb2 import *
+    from Api_pb2 import *
 except ImportError:
-    logger.critical(f"FATAL: Could not import hudiy_api_pb2.")
+    logger.critical(f"FATAL: Could not import Api_pb2.")
     logger.critical(f"Looked in: {api_path}")
     sys.exit(1)
 
@@ -145,6 +145,7 @@ def main():
 
     # --- 2. ZMQ Connection ---
     zmq_address = config['zmq_publish_address']
+    # Convert "0x635" string from config to "635"
     can_id_str = config['light_status_can_id'].replace('0x', '').upper()
     can_topic = f"CAN_{can_id_str}"
     
