@@ -1,344 +1,368 @@
-# Hudiy / RNS-E CAN Bus Integration: Full Installation Guide
 
-This guide provides a complete, step-by-step tutorial for setting up the RNS-E CAN bus integration project on a Raspberry Pi running Hudiy, Crankshaft NG, or a similar Debian-based OS. It is designed to be robust and reliable for long-term use in a vehicle.
+
+````markdown
+# Hudiy / RNS-E CAN Bus Integration
+
+This project integrates a Raspberry Pi running Hudiy (or similar OS like Crankshaft NG) with an Audi RNS-E navigation system via the CAN bus. It creates a seamless infotainment experience by enabling DIS (Driver Information System) display, steering wheel controls, and time synchronization.
 
 ## 🚀 Architecture Overview
 
-The system uses a stable microservice architecture where each script runs as a separate, managed service:
+The system uses a stable microservice architecture where each script runs as a separate, managed systemd service to ensure reliability in an automotive environment.
 
-  * **`can-handler.service`**: The central gateway to the CAN bus hardware.
-  * **`can-base-function.service`**: Provides core functions like TV tuner simulation and time synchronization.
-  * **`can-keyboard-control.service`**: Translates car button presses into virtual keyboard commands.
-  * **`can-fis-writer.service`**: Writes custom text to the instrument cluster display (FIS).
+* **`can-handler.service`**: The central gateway to the CAN bus hardware.
+* **`can-base-function.service`**: Provides core functions like TV tuner simulation and time synchronization.
+* **`can-keyboard-control.service`**: Translates car steering wheel/button presses into virtual keyboard commands (uinput).
+* **`dis_service`**: The driver used to control the instrument cluster screen.
+* **`dis_display`**: Manages the content rendered on the cluster screen.
+
+---
+
+## 🚀 Quick Installation (Recommended)
+
+The easiest way to install this project is using the automated installer script.
+
+**1. Download the Installer**
+
+wget [https://raw.githubusercontent.com/korni92/RNS-E-Hudiy/main/installer/install.sh](https://raw.githubusercontent.com/korni92/RNS-E-Hudiy/main/installer/install.sh)
+
+
+````
+
+**2. Make it Executable and Run**
+
+```bash
+chmod +x install.sh
+sudo ./install.sh
+```
+
+**3. Follow the Prompts**
+The script will ask for:
+
+  * **CAN HAT Frequency:** Usually 8, 12, or 16 MHz (Check your hardware specs).
+  * **Interrupt Pin:** Default is 25.
+
+  * ignore the error :)
+
+**4. Reboot**
+Once finished, reboot your Pi to apply all changes.
+
+```bash
+sudo reboot
+```
 
 -----
 
-## 🔧 Step 1: System Preparation
+## 🛠️ Manual Installation (Advanced)
 
-These first steps ensure your system is ready for installation.
+If you prefer to install everything manually or need to debug a specific step, follow this guide.
 
-### Make Filesystem Writable
-
-On read-only systems like Crankshaft, you must first enable write access.
-
-```bash
-sudo mount -o remount,rw /
-sudo mount -o remount,rw /boot
-```
-
-### Update System Packages
-
-Ensure your system is up-to-date.
+### 1\. Update System & Install Dependencies
 
 ```bash
 sudo apt-get update
-sudo apt-get full-upgrade -y
+sudo apt-get install -y git python3-pip can-utils python3-can python3-serial \
+    python3-tz python3-unidecode python3-zmq python3-aiozmq python3-uinput \
+    python3-protobuf python3-full python3-venv protobuf-compiler wget
 ```
 
------
+> **Note:** On newer Debian versions, if `python3-websocket-client` is not found in apt, install it via pip:
+> `pip3 install websocket-client --break-system-packages`
 
-## 📦 Step 2: Install All System Dependencies
+### 2\. Set Up Project Directories
 
-Install all required packages using the system's package manager. This is the recommended method for modern Raspberry Pi OS versions (Debian Bookworm and newer) to avoid environment conflicts.
+Clone the repository and organize the file structure.
 
 ```bash
-sudo apt-get install -y git python3-pip can-utils python3-can python3-serial python3-tz python3-unidecode python3-zmq python3-aiozmq python3-uinput
+cd /home/pi
+git clone [https://github.com/korni92/RNS-E-Hudiy.git](https://github.com/korni92/RNS-E-Hudiy.git) temp_repo
+cp -r temp_repo/rns-e_can .
+cp -r temp_repo/hudiy_client .
+cp -r temp_repo/dis_client .
+cp temp_repo/config.json .
+rm -rf temp_repo
 ```
 
------
+### 3\. Configure Permissions (Crucial)
 
-## 🛡️ Step 3: Configure Device Permissions
+Allow the `pi` user to access the virtual keyboard (`uinput`).
 
-These steps are **critical** for allowing the Python scripts to access the necessary hardware without running as root.
+```bash
+sudo usermod -a -G input pi
+echo 'uinput' | sudo tee /etc/modules-load.d/uinput.conf
+echo 'KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/99-uinput.rules
 
-### Grant Virtual Keyboard Permissions
+# Reload rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
 
-1.  **Add your user (e.g., `pi`) to the `input` group:**
-    ```bash
-    sudo usermod -a -G input pi
-    ```
-2.  **Ensure the `uinput` kernel module loads at boot:**
-    ```bash
-    echo 'uinput' | sudo tee /etc/modules-load.d/uinput.conf
-    ```
-3.  **Create a `udev` rule** to permanently set the correct permissions for the virtual keyboard device. This is the most reliable method.
-    ```bash
-    sudo nano /etc/udev/rules.d/99-uinput.rules
-    ```
-    Paste this single line into the file:
-    ```
-    KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
-    ```
-    Save and exit (`Ctrl+X`, then `Y`, then `Enter`).
+### 4\. Setup Protobuf
 
------
+Download the required API definitions and compile them.
 
-## 📂 Step 4: Download and Place Project Files
+```bash
+cd /home/pi/hudiy_client/api_files/common
+wget [https://raw.githubusercontent.com/wiboma/hudiy/main/api/Api.proto](https://raw.githubusercontent.com/wiboma/hudiy/main/api/Api.proto)
+wget [https://raw.githubusercontent.com/wiboma/hudiy/main/examples/api/python/common/Client.py](https://raw.githubusercontent.com/wiboma/hudiy/main/examples/api/python/common/Client.py)
+wget [https://raw.githubusercontent.com/wiboma/hudiy/main/examples/api/python/common/Message.py](https://raw.githubusercontent.com/wiboma/hudiy/main/examples/api/python/common/Message.py)
 
-1.  **Clone the Project from GitHub:**
+# Compile
+protoc --python_out=. Api.proto
+```
 
-    ```bash
-    cd /home/pi
-    git clone https://github.com/...
-    ```
+### 5\. Configure Hardware (CAN HAT)
 
-2.  **Set Ownership:**
-
-    ```bash
-    sudo chown -R pi:pi /home/pi/rns-e_can
-    ```
-
------
-
-## ⚙️ Step 5: Configure the CAN Interface
-
-This tells the Pi's operating system how to communicate with your CAN HAT.
-
-1.  **Edit the Boot Configuration File:**
-
-    ```bash
-    sudo nano /boot/firmware/config.txt
-    ```
-
-2.  **Add the following lines** at the end of the file.
-
-    > **⚠️ Important:** You **must** replace `12000000` with the correct oscillator frequency (in Hz) of your specific CAN HAT. Common values are `8000000`, `12000000`, or `16000000`. The interrupt pin (`25`) is also common but may vary.
+1.  **Edit Config:** Open `/boot/firmware/config.txt` (or `/boot/config.txt` on older OS versions) and add the following lines. **Replace `12000000` with your specific oscillator frequency.**
 
     ```ini
-    # --- RNS-E Pi Control CAN HAT ---
     dtparam=spi=on
     dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25,spimaxfrequency=1000000
     ```
 
-    Save and exit.
-
------
-
-## 🧠 Step 6: Create RAM Disks for Longevity
-
-To reduce wear and tear on your SD card, we'll create directories in RAM (`tmpfs`) for frequently written files like logs and communication sockets.
-
-1.  **Create the Mount Points:**
-    ```bash
-    sudo mkdir -p /var/log/rnse_control /run/rnse_control
-    sudo chown pi:pi /var/log/rnse_control /run/rnse_control
-    ```
-2.  **Open `/etc/fstab` to make the RAM disks permanent:**
-    ```bash
-    sudo nano /etc/fstab
-    ```
-3.  **Add these two lines** to the end of the file. They ensure the directories are created in RAM on every boot with the correct permissions for the `pi` user.
-    ```
-    tmpfs   /var/log/rnse_control   tmpfs   defaults,noatime,nosuid,nodev,uid=pi,gid=pi,size=16m   0 0
-    tmpfs   /run/rnse_control       tmpfs   defaults,noatime,nosuid,uid=pi,gid=pi,mode=0755,size=2m    0 0
-    ```
-    Save and exit.
-
------
-
-## 📝 Step 7: Create the Project Configuration File
-
-All services are controlled by a single `config.json` file.
-
-1.  **Navigate to your project directory and open the file:**
-    ```bash
-    cd /home/pi/
-    nano config.json
-    ```
-2.  **Paste the complete template from the repository** into this file.
-3.  **Crucially, adjust these settings:**
-      * `"can_interface"`: Should be `"can0"`.
-      * `"car_time_zone"`: Set to your local time zone (e.g., `"Europe/Berlin"`).
-      * Review all settings under `"features"` and enable/disable them as desired.
-
------
-
-## 🛠️ Step 8: Set Up Hardened Systemd Services
-
-These service files ensure your scripts start in the correct order on boot and restart automatically if they fail.
-
-1.  **File 1: `configure-can0.service`** (Sets up the hardware interface)
-
-    ```bash
-    sudo nano /etc/systemd/system/configure-can0.service
-    ```
-
-    \<details\>
-    \<summary\>Click to view content\</summary\>
+2.  **Configure Network:** Create/Edit `/etc/systemd/network/80-can.network`:
 
     ```ini
-    [Unit]
-    Description=Configure can0 Interface
-    Wants=network.target
-    After=network.target
+    [Match]
+    Name=can0
 
-    [Service]
-    Type=oneshot
-    ExecStart=/sbin/ip link set can0 up type can bitrate 100000
-    RemainAfterExit=true
-
-    [Install]
-    WantedBy=multi-user.target
+    [CAN]
+    BitRate=100K
+    RestartSec=100ms
     ```
 
-    \</details\>
-
-2.  **File 2: `can-handler.service`** (The central gateway)
+3.  **Enable Networkd:**
 
     ```bash
-    sudo nano /etc/systemd/system/can-handler.service
+    sudo systemctl enable --now systemd-networkd
     ```
 
-    \<details\>
-    \<summary\>Click to view content\</summary\>
+### 6\. Install Services
 
-    ```ini
-    [Unit]
-    Description=RNS-E CAN-Bus Handler
-    Requires=configure-can0.service
-    After=configure-can0.service
+Copy the `.service` files (ensure paths in `ExecStart` inside these files match your installation, e.g., `/home/pi/...`) to `/etc/systemd/system/`.
 
-    [Service]
-    User=pi
-    Group=pi
-    WorkingDirectory=/home/pi/rns-e_can
-    ExecStart=/usr/bin/python3 /home/pi/rns-e_can/can_handler.py
-    Restart=on-failure
-    RestartSec=5
+If you are setting this up manually or need to debug specific services, use the configurations below.
 
-    [Install]
-    WantedBy=multi-user.target
-    ```
+CAN Network Configuration
 
-    \</details\>
+This file creates the interface link for the CAN HAT.
 
-3.  **File 3: `can-base-function.service`**
+**File:** `/etc/systemd/network/80-can.network`
 
-    ```bash
-    sudo nano /etc/systemd/system/can-base-function.service
-    ```
+```ini
+[Match]
+Name=can0
 
-    \<details\>
-    \<summary\>Click to view content\</summary\>
-
-    ```ini
-    [Unit]
-    Description=RNS-E CAN-Bus Base Functionality
-    Requires=can-handler.service
-    After=can-handler.service
-    BindsTo=can-handler.service
-
-    [Service]
-    ExecStart=/usr/bin/python3 /home/pi/rns-e_can/can_base_function.py
-    WorkingDirectory=/home/pi/rns-e_can
-    User=pi
-    Group=pi
-    Restart=on-failure
-    RestartSec=5
-
-    [Install]
-    WantedBy=multi-user.target
-    ```
-
-    \</details\>
-
-4.  **File 4: `can-keyboard-control.service`**
-
-    ```bash
-    sudo nano /etc/systemd/system/can-keyboard-control.service
-    ```
-
-    \<details\>
-    \<summary\>Click to view content\</summary\>
-
-    ```ini
-    [Unit]
-    Description=RNS-E CAN-Bus Keyboard Simulation (uinput)
-    Requires=can-handler.service
-    After=can-handler.service
-    BindsTo=can-handler.service
-
-    [Service]
-    ExecStart=/usr/bin/python3 /home/pi/rns-e_can/can_keyboard_control.py
-    WorkingDirectory=/home/pi/rns-e_can
-    Restart=on-failure
-    RestartSec=3
-    User=pi
-    Group=input
-
-    [Install]
-    WantedBy=multi-user.target
-    ```
-
------
-
-## 🎉 Step 9: Finalize and Reboot
-
-Enable the new services to start on boot and reboot the system for all changes to take effect.
-
-1.  **Reload the systemd manager to read the new service files:**
-    ```bash
-    sudo systemctl daemon-reload
-    ```
-2.  **Enable all 5 services to start on boot:**
-    ```bash
-    sudo systemctl enable configure-can0.service can-handler.service can-base-function.service can-keyboard-control.service
-    ```
-3.  **Reboot the Raspberry Pi:**
-    ```bash
-    sudo reboot
-    ```
-
-After the reboot, your system is fully installed and operational\!
-
------
-
-## 💡 Usage and Troubleshooting
-
-### Checking Service Status
-
-To check if all services are running correctly:
-
-```bash
-sudo systemctl status configure-can0 can-handler can-base-function can-keyboard-control can-fis-writer
+[CAN]
+BitRate=100K
+RestartSec=100ms
 ```
 
-### Viewing Logs
+-----
 
-If a service fails, its log is the best place to find the error.
+Systemd Services
 
-```bash
-# Example: Check the logs for the keyboard service
-journalctl -u can-keyboard-control.service -f
+Create the following files in `/etc/systemd/system/`.
+
+> **Note:** These examples assume your username is `pi` and your installation path is `/home/pi`.
+
+A. CAN Handler (Gateway)**
+
+The core service that manages the connection to the CAN bus hardware.
+
+**File:** `/etc/systemd/system/can_handler.service`
+
+```ini
+[Unit]
+Description=RNS-E CAN-Bus Handler
+BindsTo=sys-subsystem-net-devices-can0.device
+After=sys-subsystem-net-devices-can0.device
+
+[Service]
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/rns-e_can
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/pi/rns-e_can/can_handler.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-### Common Errors
+B. Base Functionality**
 
-  * **`OSError: [Errno 19] No such device`** in `can-keyboard-control.service` log: The `uinput` module isn't loaded. This was fixed in Step 3, but a reboot is required for it to take effect.
-  * **Permission Denied:** A file or directory has the wrong owner. Use `sudo chown -R pi:pi /path/to/dir` to fix.
-  * **Service fails with `code=exited, status=1/FAILURE`:** Check the logs (`journalctl`) for a Python `Traceback`. This usually points to a missing config key or a bug in the script.
+Handles TV tuner simulation and time sync.
 
------
+**File:** `/etc/systemd/system/can_base_function.service`
 
------
+```ini
+[Unit]
+Description=RNS-E CAN-Bus Base Functionality
+Requires=can_handler.service
+After=can_handler.service
+BindsTo=can_handler.service
 
-## Using Composite Video Output on Pi4
+[Service]
+ExecStart=/usr/bin/python3 /home/pi/rns-e_can/can_base_function.py
+WorkingDirectory=/home/pi/rns-e_can
+User=pi
+Group=pi
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
 
-To use composite video output with the Pi4, you need to edit `config.txt` and `cmdline.txt` to set the custom resolution for the RNS-E `800x480` for 193 PU models or `480x234` for the older 192 model. 
+[Install]
+WantedBy=multi-user.target
+```
 
-in `config.txt` under `[all]` you need to add this section. Uncomment the settings you need for your RNS-E
+C. Keyboard Control**
+
+Maps steering wheel buttons to system keystrokes.
+*Requires `uinput` permissions.*
+
+**File:** `/etc/systemd/system/can_keyboard_control.service`
+
+```ini
+[Unit]
+Description=RNS-E CAN-Bus Keyboard Simulation
+Wants=can_handler.service
+After=can_handler.service
+
+[Service]
+ExecStart=/usr/bin/python3 /home/pi/rns-e_can/can_keyboard_control.py
+WorkingDirectory=/home/pi/rns-e_can
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=3
+User=pi
+Group=input
+
+[Install]
+WantedBy=multi-user.target
+```
+
+D. Hudiy Integration APIs**
+
+These services allow the system to communicate with the Hudiy interface (Dark mode and Data).
+
+**File:** `/etc/systemd/system/dark_mode_api.service`
+
+```ini
+[Unit]
+Description=Hudiy Dark Mode CAN Bus Service
+Requires=can_handler.service
+After=can_handler.service
+
+[Service]
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/hudiy_client
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/pi/hudiy_client/dark_mode_api.py
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**File:** `/etc/systemd/system/hudiy_data_api.service`
+
+```ini
+[Unit]
+Description=Hudiy Data Extractor
+Requires=can_handler.service
+After=can_handler.service
+
+[Service]
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/hudiy_client
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/pi/hudiy_client/hudiy_data.py
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+E. DIS (Cluster Display) Services**
+
+These services control the screen in the instrument cluster. Note the built-in delays to ensure the system is ready before launching.
+
+**File:** `/etc/systemd/system/dis_service.service`
+
+```ini
+[Unit]
+Description=DIS CAN Driver
+Requires=can_handler.service
+After=can_handler.service
+BindsTo=can_handler.service
+
+[Service]
+ExecStartPre=/bin/sleep 30
+ExecStart=/usr/bin/python3 /home/pi/dis_client/dis_service.py
+WorkingDirectory=/home/pi/dis_client
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+User=pi
+Group=input
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**File:** `/etc/systemd/system/dis_display.service`
+
+```ini
+[Unit]
+Description=DIS Menu Structure
+Requires=dis_service.service
+After=dis_service.service
+BindsTo=dis_service.service
+
+[Service]
+ExecStartPre=/bin/sleep 15
+ExecStart=/usr/bin/python3 /home/pi/dis_client/dis_display.py
+WorkingDirectory=/home/pi/dis_client
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+User=pi
+Group=input
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Applying Changes
+
+After creating or modifying these files, reload the systemd daemon:
 
 ```bash
-# Force HDMI driver 2 for audio compatibility (standard DMT/custom mode practice)
-hdmi_drive=2 
-hdmi_ignore_hotplug=1
+sudo systemctl daemon-reload
+sudo systemctl enable --now can_handler.service can_base_function.service \
+    can_keyboard_control.service dark_mode_api.service hudiy_data_api.service \
+    dis_service.service dis_display.service
+```
 
-# --- RNS-E DISPLAY CONFIGURATION BLOCKS ---
-# 
-# To use a configuration, uncomment ONE of the blocks below:
-#
+-----
+
+## 📺 Composite Video Configuration (Pi 4)
+
+To use the RNS-E screen via composite video output (RCA) on a Raspberry Pi 4:
+
+**1. Edit `/boot/firmware/config.txt`**
+Enable composite output and set the timing for RNS-E 193 PU (800x480):
+
+```ini
+ # To use a configuration, uncomment ONE of the blocks below:
 
 # --- 1. RNS-E 193 (800 x 480 pixels) ---
+
 # hdmi_cvt=800 480 60 6 0 0 0 
 # hdmi_group=2
 # hdmi_mode=87
@@ -351,6 +375,7 @@ hdmi_ignore_hotplug=1
 # overscan_right=0
 
 # --- 2. RNS-E 192 / Old (480 x 234 pixels) ---
+
 # hdmi_cvt=480 234 60 6 0 0 0
 # hdmi_group=2
 # hdmi_mode=87
@@ -361,10 +386,26 @@ hdmi_ignore_hotplug=1
 # overscan_top=0 
 # overscan_left=0
 # overscan_right=0
+
+``` 
 ```
 
-in `cmdline.txt` you have to add at the end and replace XXXxXXX@60 with your resolution. If the picture isn't centered, too big or you have borders, you can add values to `margin_left` `margin_right` `margin_top` or `margin_bottom`. Positive values shrink the picture to this side and negative ones will extend it. 
+**2. Edit `/boot/firmware/cmdline.txt`**
 
-```bash
+in `cmdline.txt` you have to add at the end and replace XXXxXXX@60 with your resolution. If the picture isn't centered, too big or you have borders, you can add values to `margin_left` `margin_right` `margin_top` or `margin_bottom`. Positive values shrink the picture to this side and negative ones will extend it.  
+
 video=Composite-1:XXXxXXX@60,margin_left=0,margin_right=0,margin_top=0,margin_bottom=0
+
+``` 
 ```
+
+-----
+
+## 💡 Troubleshooting
+
+| Issue | Cause | Fix |
+| :--- | :--- | :--- |
+| **`OSError: [Errno 19] No such device`** | `uinput` kernel module is not loaded. | Ensure Step 3 (Permissions) was run. Verify with `ls -l /dev/uinput`. Reboot. |
+| **Permission denied errors** | Service user cannot access files. | Run `sudo chown -R pi:pi /home/pi/rns-e_can` (and other project folders). |
+| **Services fail (`code=exited, status=1`)** | Python syntax error or missing library. | Check logs: `journalctl -u can_handler.service -f` |
+| **"Network is down"** | CAN interface failed to start. | Check `/boot/firmware/config.txt`. Verify oscillator frequency matches your HAT. Run `systemctl status systemd-networkd`. |
