@@ -23,7 +23,7 @@ The easiest way to install this project is using the automated installer script.
 
 **1. Download the Installer**
 
-wget [https://raw.githubusercontent.com/korni92/RNS-E-Hudiy/main/installer/install.sh](https://raw.githubusercontent.com/korni92/RNS-E-Hudiy/main/installer/install.sh)
+wget https://raw.githubusercontent.com/korni92/RNS-E-Hudiy/main/install.sh
 
 
 ````
