@@ -1,14 +1,13 @@
 #!/bin/bash
 # ==============================================================================
-# RNS-E Hudiy Integration - Automated Installer (v4.0)
+# RNS-E Hudiy Integration - Automated Installer (v1.0)
 # ==============================================================================
 
-# 1. CRITICAL PATH FIX: Ensure system binaries are visible to sudo
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Ensure script is run as root
 if [ "$EUID" -ne 0 ]; then
-  echo "❌ Please run as root (use sudo)"
+  echo "âŒ Please run as root (use sudo)"
   exit 1
 fi
 
@@ -41,7 +40,7 @@ echo "==================================================="
 # ------------------------------------------------------------------------------
 # 1. System Update & Dependencies
 # ------------------------------------------------------------------------------
-echo "▶ Step 1: Installing System Dependencies..."
+echo "â–¶ Step 1: Installing System Dependencies..."
 apt-get update
 apt-get install -y git python3-pip can-utils python3-can python3-serial \
     python3-tz python3-unidecode python3-zmq python3-aiozmq python3-uinput \
@@ -54,12 +53,12 @@ else
     echo "   - Not found in apt, attempting pip install..."
     pip3 install websocket-client --break-system-packages &> /dev/null
 fi
-echo "✅ Dependencies installed."
+echo "âœ… Dependencies installed."
 
 # ------------------------------------------------------------------------------
 # 2. Download & Install Project Files
 # ------------------------------------------------------------------------------
-echo "▶ Step 2: Downloading Project Files..."
+echo "â–¶ Step 2: Downloading Project Files..."
 
 # Create a temporary directory for cloning
 TEMP_DIR=$(mktemp -d)
@@ -110,12 +109,12 @@ chown -R $REAL_USER:$REAL_USER "$REAL_HOME/hudiy_client"
 chown -R $REAL_USER:$REAL_USER "$REAL_HOME/dis_client"
 chown $REAL_USER:$REAL_USER "$REAL_HOME/config.json"
 
-echo "✅ Project files installed and cleaned."
+echo "âœ… Project files installed and cleaned."
 
 # ------------------------------------------------------------------------------
 # 3. Configure Device Permissions (uinput)
 # ------------------------------------------------------------------------------
-echo "▶ Step 3: Configuring Device Permissions..."
+echo "â–¶ Step 3: Configuring Device Permissions..."
 
 usermod -a -G input $REAL_USER
 echo 'uinput' | tee /etc/modules-load.d/uinput.conf > /dev/null
@@ -124,12 +123,12 @@ echo 'KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput
 udevadm control --reload-rules
 udevadm trigger
 
-echo "✅ Permissions configured."
+echo "âœ… Permissions configured."
 
 # ------------------------------------------------------------------------------
 # 4. Protobuf Setup (Fixed URLs)
 # ------------------------------------------------------------------------------
-echo "▶ Step 4: Setting up Protobuf..."
+echo "â–¶ Step 4: Setting up Protobuf..."
 
 PROTO_DIR="$REAL_HOME/hudiy_client/api_files/common"
 mkdir -p "$PROTO_DIR"
@@ -143,7 +142,7 @@ $WGET_CMD -q -N https://raw.githubusercontent.com/wiboma/hudiy/main/examples/api
 
 # Verify downloads
 if [ ! -s "Client.py" ] || [ ! -s "Message.py" ]; then
-    echo "❌ ERROR: Failed to download Client.py or Message.py."
+    echo "âŒ ERROR: Failed to download Client.py or Message.py."
     echo "   Attempting to continue, but Hudiy API may fail."
 else
     echo "   Dependencies downloaded successfully."
@@ -153,15 +152,15 @@ fi
 if [ -x "$(command -v protoc)" ]; then
     protoc --python_out=. Api.proto
     chown -R $REAL_USER:$REAL_USER "$REAL_HOME/hudiy_client/api_files"
-    echo "✅ Protobuf code generated."
+    echo "âœ… Protobuf code generated."
 else
-    echo "❌ ERROR: 'protoc' command not found."
+    echo "âŒ ERROR: 'protoc' command not found."
 fi
 
 # ------------------------------------------------------------------------------
 # 5. Configure CAN Interface (Hardware)
 # ------------------------------------------------------------------------------
-echo "▶ Step 5: Configuring CAN Interface Hardware..."
+echo "â–¶ Step 5: Configuring CAN Interface Hardware..."
 
 CONFIG_TXT="/boot/firmware/config.txt"
 [ ! -f "$CONFIG_TXT" ] && CONFIG_TXT="/boot/config.txt"
@@ -199,7 +198,7 @@ fi
 # ------------------------------------------------------------------------------
 # 6. Create RAM Disks
 # ------------------------------------------------------------------------------
-echo "▶ Step 6: Setting up RAM Disks..."
+echo "â–¶ Step 6: Setting up RAM Disks..."
 
 mkdir -p /var/log/rnse_control /run/rnse_control
 chown $REAL_USER:$REAL_USER /var/log/rnse_control /run/rnse_control
@@ -217,7 +216,7 @@ mount -a
 # ------------------------------------------------------------------------------
 # 7. Install Systemd Services (Networkd Method)
 # ------------------------------------------------------------------------------
-echo "▶ Step 7: Installing Systemd Services..."
+echo "â–¶ Step 7: Installing Systemd Services..."
 
 # --- A: NETWORK CONFIG ---
 echo "   Configuring systemd-networkd for can0..."
@@ -390,7 +389,7 @@ $SYSTEMCTL enable --now can_handler.service can_base_function.service \
 # Start delayed services non-blocking
 $SYSTEMCTL enable --now --no-block dis_service.service dis_display.service
 
-echo "✅ Services installed, network configured, and started."
+echo "âœ… Services installed, network configured, and started."
 echo ""
 echo "==================================================="
 echo "   Installation Complete!"
