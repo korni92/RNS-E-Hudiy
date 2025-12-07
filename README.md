@@ -9,6 +9,13 @@ This project integrates a Raspberry Pi running Hudiy (or similar OS like Cranksh
 
 The system uses a stable microservice architecture where each script runs as a separate, managed systemd service to ensure reliability in an automotive environment.
 
+You need at least
+Raspberry Pi 4 or 5
+5A DC/DC Bucket converter
+SRGB HDMI or composite video converter
+CAN Hat like MCP2515
+DAC Hat
+
 * **`can-handler.service`**: The central gateway to the CAN bus hardware.
 * **`can-base-function.service`**: Provides core functions like TV tuner simulation and time synchronization.
 * **`can-keyboard-control.service`**: Translates car steering wheel/button presses into virtual keyboard commands (uinput).
