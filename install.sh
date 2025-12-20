@@ -1,17 +1,17 @@
 #!/bin/bash
 # ==============================================================================
-# RNS-E Hudiy Integration - Automated Installer (v1.0)
+# RNS-E Hudiy Integration - Automated Installer (v1.1)
 # ==============================================================================
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Ensure script is run as root
 if [ "$EUID" -ne 0 ]; then
-  echo "âŒ Please run as root (use sudo)"
+  echo "? Please run as root (use sudo)"
   exit 1
 fi
 
-# --- 2. CONFIGURATION & DETECTION ---
+# --- CONFIGURATION & DETECTION ---
 
 SYSTEMCTL=$(command -v systemctl || echo "/usr/bin/systemctl")
 REBOOT=$(command -v reboot || echo "/usr/sbin/reboot")
@@ -30,17 +30,24 @@ fi
 REPO_URL="https://github.com/korni92/RNS-E-Hudiy.git"
 BRANCH="main"
 
+# Define Config Paths
+CONFIG_TXT="/boot/firmware/config.txt"
+[ ! -f "$CONFIG_TXT" ] && CONFIG_TXT="/boot/config.txt"
+CMDLINE_TXT="/boot/firmware/cmdline.txt"
+[ ! -f "$CMDLINE_TXT" ] && CMDLINE_TXT="/boot/cmdline.txt"
+
 echo "==================================================="
-echo "   RNS-E Hudiy Integration Installer"
+echo "   RNS-E Hudiy Integration Installer (v1.3)"
 echo "==================================================="
 echo "   Target User: $REAL_USER"
 echo "   Target Home: $REAL_HOME"
+echo "   Config Path: $CONFIG_TXT"
 echo "==================================================="
 
 # ------------------------------------------------------------------------------
 # 1. System Update & Dependencies
 # ------------------------------------------------------------------------------
-echo "â–¶ Step 1: Installing System Dependencies..."
+echo "? Step 1: Installing System Dependencies..."
 apt-get update
 apt-get install -y git python3-pip can-utils python3-can python3-serial \
     python3-tz python3-unidecode python3-zmq python3-aiozmq python3-uinput \
@@ -53,12 +60,12 @@ else
     echo "   - Not found in apt, attempting pip install..."
     pip3 install websocket-client --break-system-packages &> /dev/null
 fi
-echo "âœ… Dependencies installed."
+echo "? Dependencies installed."
 
 # ------------------------------------------------------------------------------
 # 2. Download & Install Project Files
 # ------------------------------------------------------------------------------
-echo "â–¶ Step 2: Downloading Project Files..."
+echo "? Step 2: Downloading Project Files..."
 
 # Create a temporary directory for cloning
 TEMP_DIR=$(mktemp -d)
@@ -109,12 +116,12 @@ chown -R $REAL_USER:$REAL_USER "$REAL_HOME/hudiy_client"
 chown -R $REAL_USER:$REAL_USER "$REAL_HOME/dis_client"
 chown $REAL_USER:$REAL_USER "$REAL_HOME/config.json"
 
-echo "âœ… Project files installed and cleaned."
+echo "? Project files installed and cleaned."
 
 # ------------------------------------------------------------------------------
 # 3. Configure Device Permissions (uinput)
 # ------------------------------------------------------------------------------
-echo "â–¶ Step 3: Configuring Device Permissions..."
+echo "? Step 3: Configuring Device Permissions..."
 
 usermod -a -G input $REAL_USER
 echo 'uinput' | tee /etc/modules-load.d/uinput.conf > /dev/null
@@ -123,12 +130,12 @@ echo 'KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput
 udevadm control --reload-rules
 udevadm trigger
 
-echo "âœ… Permissions configured."
+echo "? Permissions configured."
 
 # ------------------------------------------------------------------------------
 # 4. Protobuf Setup (Fixed URLs)
 # ------------------------------------------------------------------------------
-echo "â–¶ Step 4: Setting up Protobuf..."
+echo "? Step 4: Setting up Protobuf..."
 
 PROTO_DIR="$REAL_HOME/hudiy_client/api_files/common"
 mkdir -p "$PROTO_DIR"
@@ -142,7 +149,7 @@ $WGET_CMD -q -N https://raw.githubusercontent.com/wiboma/hudiy/main/examples/api
 
 # Verify downloads
 if [ ! -s "Client.py" ] || [ ! -s "Message.py" ]; then
-    echo "âŒ ERROR: Failed to download Client.py or Message.py."
+    echo "? ERROR: Failed to download Client.py or Message.py."
     echo "   Attempting to continue, but Hudiy API may fail."
 else
     echo "   Dependencies downloaded successfully."
@@ -152,18 +159,26 @@ fi
 if [ -x "$(command -v protoc)" ]; then
     protoc --python_out=. Api.proto
     chown -R $REAL_USER:$REAL_USER "$REAL_HOME/hudiy_client/api_files"
-    echo "âœ… Protobuf code generated."
+    echo "? Protobuf code generated."
 else
-    echo "âŒ ERROR: 'protoc' command not found."
+    echo "? ERROR: 'protoc' command not found."
 fi
 
 # ------------------------------------------------------------------------------
 # 5. Configure CAN Interface (Hardware)
 # ------------------------------------------------------------------------------
-echo "â–¶ Step 5: Configuring CAN Interface Hardware..."
+echo "? Step 5: Configuring CAN Interface Hardware..."
 
-CONFIG_TXT="/boot/firmware/config.txt"
-[ ! -f "$CONFIG_TXT" ] && CONFIG_TXT="/boot/config.txt"
+# Ensure SPI is enabled first (Uncomment dtparam=spi=on)
+if grep -q "#dtparam=spi=on" "$CONFIG_TXT"; then
+    echo "   Enabling SPI (uncommenting in config.txt)..."
+    sed -i 's/#dtparam=spi=on/dtparam=spi=on/g' "$CONFIG_TXT"
+elif ! grep -q "dtparam=spi=on" "$CONFIG_TXT"; then
+    echo "   Enabling SPI (appending to config.txt)..."
+    echo "dtparam=spi=on" >> "$CONFIG_TXT"
+else
+    echo "   SPI already enabled."
+fi
 
 if grep -q "dtoverlay=mcp2515-can0" "$CONFIG_TXT"; then
     echo "   CAN hardware overlay found in $CONFIG_TXT."
@@ -190,7 +205,6 @@ else
     cat <<EOF >> "$CONFIG_TXT"
 
 # --- RNS-E Pi Control CAN HAT ---
-dtparam=spi=on
 dtoverlay=mcp2515-can0,oscillator=$OSC_FREQ,interrupt=$INT_PIN,spimaxfrequency=1000000
 EOF
 fi
@@ -198,7 +212,7 @@ fi
 # ------------------------------------------------------------------------------
 # 6. Create RAM Disks
 # ------------------------------------------------------------------------------
-echo "â–¶ Step 6: Setting up RAM Disks..."
+echo "? Step 6: Setting up RAM Disks..."
 
 mkdir -p /var/log/rnse_control /run/rnse_control
 chown $REAL_USER:$REAL_USER /var/log/rnse_control /run/rnse_control
@@ -208,7 +222,7 @@ if grep -q "rnse_control" /etc/fstab; then
 else
     cat <<EOF >> /etc/fstab
 tmpfs   /var/log/rnse_control   tmpfs   defaults,noatime,nosuid,nodev,uid=$REAL_USER,gid=$REAL_USER,size=16m   0 0
-tmpfs   /run/rnse_control       tmpfs   defaults,noatime,nosuid,uid=$REAL_USER,gid=$REAL_USER,mode=0755,size=2m    0 0
+tmpfs   /run/rnse_control       tmpfs   defaults,noatime,nosuid,uid=$REAL_USER,gid=$REAL_USER,mode=0755,size=2m     0 0
 EOF
 fi
 mount -a
@@ -216,7 +230,7 @@ mount -a
 # ------------------------------------------------------------------------------
 # 7. Install Systemd Services (Networkd Method)
 # ------------------------------------------------------------------------------
-echo "â–¶ Step 7: Installing Systemd Services..."
+echo "? Step 7: Installing Systemd Services..."
 
 # --- A: NETWORK CONFIG ---
 echo "   Configuring systemd-networkd for can0..."
@@ -234,9 +248,10 @@ EOF
 write_service() {
     NAME=$1
     CONTENT=$2
-    PATH="/etc/systemd/system/$NAME"
+    # FIX: Renamed variable from PATH to SERVICE_PATH to avoid overwriting system PATH
+    SERVICE_PATH="/etc/systemd/system/$NAME"
     echo "   Writing $NAME..."
-    echo "$CONTENT" > "$PATH"
+    echo "$CONTENT" > "$SERVICE_PATH"
 }
 
 # 1. can_handler
@@ -389,7 +404,95 @@ $SYSTEMCTL enable --now can_handler.service can_base_function.service \
 # Start delayed services non-blocking
 $SYSTEMCTL enable --now --no-block dis_service.service dis_display.service
 
-echo "âœ… Services installed, network configured, and started."
+echo "? Services installed, network configured, and started."
+
+# ------------------------------------------------------------------------------
+# 8. Configure Composite Video (Optional)
+# ------------------------------------------------------------------------------
+echo "? Step 8: Configure Composite Video (RNS-E TV-Out)..."
+echo "   Do you want to configure Composite Video output for the RNS-E screen?"
+read -p "   (y/n): " composite_choice
+
+if [[ "$composite_choice" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "   Which RNS-E version do you have?"
+    echo "   1) RNS-E 192 (CD/TV button) -> 480x234"
+    echo "   2) RNS-E 193 (MEDIA button) -> 800x480"
+    read -p "   Enter choice [1-2]: " rnse_version
+
+    case $rnse_version in
+        1)
+            CVT_MODE="480 234 60 6 0 0 0"
+            CMDLINE_RES="480x234"
+            echo "   -> Selected 192 (480x234)"
+            ;;
+        2)
+            CVT_MODE="800 480 60 6 0 0 0"
+            CMDLINE_RES="800x480"
+            echo "   -> Selected 193 (800x480)"
+            ;;
+        *)
+            CVT_MODE="800 480 60 6 0 0 0"
+            CMDLINE_RES="800x480"
+            echo "   -> Invalid choice. Defaulting to 193 (800x480)."
+            ;;
+    esac
+
+    # 1. Edit config.txt
+    echo "   Modifying $CONFIG_TXT..."
+    cp "$CONFIG_TXT" "$CONFIG_TXT.bak"
+    
+    # We use sed to find the KMS line and REPLACE it with the FKMS line.
+    # This handles the replacement inline without relying on unreliable grep checks.
+    # If standard KMS is found, we comment it out and add FKMS below it.
+    if grep -q "dtoverlay=vc4-kms-v3d" "$CONFIG_TXT"; then
+        # Disable KMS, Add FKMS
+        sed -i 's/^dtoverlay=vc4-kms-v3d/#dtoverlay=vc4-kms-v3d\ndtoverlay=vc4-fkms-v3d,composite=1/g' "$CONFIG_TXT"
+    elif grep -q "dtoverlay=vc4-fkms-v3d" "$CONFIG_TXT"; then
+         # Ensure composite=1 is present
+         if ! grep -q "composite=1" "$CONFIG_TXT"; then
+            sed -i 's/dtoverlay=vc4-fkms-v3d/dtoverlay=vc4-fkms-v3d,composite=1/g' "$CONFIG_TXT"
+         fi
+    else
+         # If neither exists, append it
+         echo "dtoverlay=vc4-fkms-v3d,composite=1" >> "$CONFIG_TXT"
+    fi
+
+    # Append the video settings block
+    cat <<EOF >> "$CONFIG_TXT"
+
+# --- RNS-E Composite Video Settings ---
+# Force HDMI driver 2 for audio compatibility (standard DMT/custom mode practice)
+hdmi_drive=2
+hdmi_ignore_hotplug=1
+hdmi_cvt=$CVT_MODE
+hdmi_group=2
+hdmi_mode=87
+enable_tvout=1
+# overscan_scale=1
+# overscan_bottom=0
+# overscan_top=0 
+# overscan_left=0
+# overscan_right=0
+EOF
+
+    # 2. Edit cmdline.txt - SAFER APPEND METHOD
+    echo "   Modifying $CMDLINE_TXT..."
+    cp "$CMDLINE_TXT" "$CMDLINE_TXT.bak"
+
+    # Remove any existing Composite arguments to avoid duplicates
+    sed -i 's/ video=Composite-1[^ ]*//g' "$CMDLINE_TXT"
+
+    # Safely append to the end of the line using sed substitute
+    # s/$/ text/ adds ' text' to the end of the line.
+    sed -i "s/$/ video=Composite-1:${CMDLINE_RES}@60,margin_left=0,margin_right=0,margin_top=0,margin_bottom=0/" "$CMDLINE_TXT"
+
+    echo "? Composite Video configured."
+else
+    echo "   Skipping Composite Video configuration."
+fi
+
+
 echo ""
 echo "==================================================="
 echo "   Installation Complete!"
