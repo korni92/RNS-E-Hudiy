@@ -485,7 +485,7 @@ EOF
 
     # Safely append to the end of the line using sed substitute
     # s/$/ text/ adds ' text' to the end of the line.
-    sed -i "s/$/ video=Composite-1:${CMDLINE_RES}@60,margin_left=0,margin_right=0,margin_top=0,margin_bottom=0/" "$CMDLINE_TXT"
+    sed -i "s/$/ video=Composite-1:${CMDLINE_RES}@60i,margin_left=0,margin_right=0,margin_top=0,margin_bottom=0/" "$CMDLINE_TXT"
 
     echo "? Composite Video configured."
 else
