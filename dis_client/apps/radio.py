@@ -1,4 +1,4 @@
-# /home/pi/dis_manager/apps/radio.py
+import sys
 from .base import BaseApp
 
 class RadioApp(BaseApp):
@@ -8,50 +8,81 @@ class RadioApp(BaseApp):
         self.bot = ""
         self.topics_top = set()
         self.topics_bot = set()
+        self.topics = set()
+        print("[RadioApp] Initialized")
 
     def set_topics(self, t_top, t_bot):
-        """Called by main driver to inject configured topics."""
         self.topics_top = t_top
         self.topics_bot = t_bot
+        self.topics = self.topics_top.union(self.topics_bot)
+        print(f"[RadioApp] Topics set: {self.topics}")
 
     def update_can(self, topic, payload):
+        """
+        Receives RAW BYTES from DisplayEngine.
+        """
+        is_top = topic in self.topics_top
+        is_bot = topic in self.topics_bot
+
+        if not (is_top or is_bot):
+            return
+
         try:
-            # No .strip() to preserve clearing spaces
-            raw = payload.split(b'\x00')[0]
-            text = raw.decode('ascii', errors='replace').rstrip('\x00')
-            
-            if topic in self.topics_top: self.top = text
-            elif topic in self.topics_bot: self.bot = text
-        except: pass
+            if isinstance(payload, bytes):
+                # 1. Decode Audi ISO-8859-1 (Latin-1)
+                decoded = payload.decode('iso-8859-1', errors='replace')
+                
+                # 2. Handle Control Characters (0x1C)
+                # The radio sends 0x1C as a spacer block. We map it to SPACE (0x20).
+                # This turns "\x1c\x1cFM" into "  FM", preserving the indentation.
+                clean_text = decoded.replace('\x1c', ' ')
+                
+                # 3. Clean Nulls
+                clean_text = clean_text.replace('\x00', '')
+                
+                # Debug: Verify we have leading spaces
+                # print(f"[RadioApp] '{topic}' -> '{clean_text}'")
+
+                if is_top:
+                    self.top = clean_text
+                elif is_bot:
+                    self.bot = clean_text
+                    
+        except Exception as e:
+            print(f"[RadioApp] Error decoding {topic}: {e}")
 
     def handle_input(self, action):
-        # Long Press UP -> Go Back to previous menu (Media)
-        if action == 'hold_up': 
-            return 'BACK'
-        # Long Press DOWN -> Also Back (or stay/exit)
-        if action == 'hold_down':
+        if action in ['hold_up', 'hold_down']: 
             return 'BACK'
         return None
 
     def get_view(self):
         lines = {}
-        # Line 1: "Radio" Headline (Centered Protocol)
         lines['line1'] = ("Radio", self.FLAG_HEADER)
 
-        # Line 3: Station Info (Manual Wipe)
-        # Using Fixed Width (0x02) + Manual Padding to erase ghosts
-        txt_top = self.top
-        if not txt_top.strip(): txt_top = " " * 10
-        else: txt_top = txt_top[:10].center(10)
-        lines['line3'] = (txt_top, self.FLAG_WIPE)
+        t_top = str(self.top) if self.top else ""
+        t_bot = str(self.bot) if self.bot else ""
 
-        # Line 4: Details (Manual Wipe Left Align)
-        txt_bot = self.bot
-        if not txt_bot.strip(): txt_bot = " " * 16
-        else: txt_bot = txt_bot.ljust(16)[:16]
-        lines['line4'] = (txt_bot, self.FLAG_ITEM) # Use ITEM flag for smaller text
+        # --- FIX FOR ARTIFACTS AND CENTERING ---
+        # We use .ljust(LENGTH) to pad the string with spaces.
+        # This ensures "FM" becomes "FM        ", overwriting any old text like "TV/VIDEO".
+        
+        # Line 3 (Top Station): Limit 10 chars, Pad to 10
+        # If t_top is "  FM" (4 chars), it becomes "  FM      " (10 chars).
+        # This preserves the leading spaces (centering) AND clears the end (artifacts).
+        if not t_top.strip():
+             # If completely empty, send full blank line to wipe
+            lines['line3'] = (" " * 10, self.FLAG_WIPE)
+        else:
+            lines['line3'] = (t_top[:10].ljust(10), self.FLAG_WIPE)
 
-        # Clear unused
+        # Line 4 (Info): Limit 16 chars, Pad to 16
+        if not t_bot.strip():
+            lines['line4'] = (" " * 16, self.FLAG_ITEM)
+        else:
+            lines['line4'] = (t_bot[:16].ljust(16), self.FLAG_ITEM)
+
         lines['line2'] = (" " * 16, self.FLAG_ITEM)
         lines['line5'] = (" " * 16, self.FLAG_ITEM)
+        
         return lines
