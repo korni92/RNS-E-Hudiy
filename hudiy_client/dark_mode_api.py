@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Hudiy Dark Mode Service V1.1
+Hudiy Dark Mode Service
 
 This service listens for CAN bus messages (via ZMQ from can_handler.py)
 to automatically toggle the Hudiy day/night mode and optionally Android Auto.
+
+sync_android_auto
+true: bind AA settings to script
+false: bin AA settings to hudiy option
 
 It reads /home/pi/config.json to check if the feature is enabled.
 """
@@ -34,7 +38,7 @@ logger = logging.getLogger(__name__)
 api_path = os.path.dirname(os.path.abspath(__file__)) + '/api_files/common'
 sys.path.insert(0, api_path)
 try:
-    #  assume Api_pb2 1.1 definitions
+    # Api_pb2 regenerated/updated to include the new 1.1 definitions
     from Api_pb2 import *
 except ImportError:
     logger.critical(f"FATAL: Could not import Api_pb2.")
@@ -43,13 +47,13 @@ except ImportError:
 
 
 # --- Hudiy API Function ---
-def send_dark_mode(enabled, sync_android_auto=True, max_retries=3):
+def send_dark_mode(enabled, sync_android_auto=False, max_retries=3):
     """
     Connects to Hudiy and sends the dark mode command.
     
     Args:
         enabled (bool): True for Night, False for Day.
-        sync_android_auto (bool): If True, also sends the specific Android Auto command.
+        sync_android_auto (bool): If True, explicitly sets Android Auto mode (overwrites 'Common').
         max_retries (int): Number of connection attempts.
         
     Returns:
@@ -72,33 +76,34 @@ def send_dark_mode(enabled, sync_android_auto=True, max_retries=3):
             frame = struct.pack('<III', len(data), MESSAGE_HELLO_REQUEST, 0) + data
             sock.sendall(frame)
             
-            # 2. Set System Dark Mode (Existing Logic)
+            # 2. Set System Dark Mode
+            # This is usually sufficient if AA is set to "Common" in settings
             dark = SetDarkMode()
             dark.enabled = enabled
             data = dark.SerializeToString()
             frame = struct.pack('<III', len(data), MESSAGE_SET_DARK_MODE, 0) + data
             sock.sendall(frame)
             
-            # 3. Set Android Auto Mode (New Logic)
+            # 3. Set Android Auto Mode (Optional)
+            # Only send this if specific independent control is requested, 
+            # otherwise it overwrites the "Common" setting.
             if sync_android_auto:
                 try:
                     aa_msg = SetAndroidAutoDayNightMode()
                     # Map boolean to Enum: NIGHT=1, DAY=2 (Based on typical Proto definitions)
-                    # Using the class attributes ensures we match the generated code
                     aa_msg.mode = SetAndroidAutoDayNightMode.NIGHT if enabled else SetAndroidAutoDayNightMode.DAY
                     
                     data_aa = aa_msg.SerializeToString()
-                    # Ensure MESSAGE_SET_ANDROID_AUTO_DAY_NIGHT_MODE is defined in your updated Api_pb2
                     frame_aa = struct.pack('<III', len(data_aa), MESSAGE_SET_ANDROID_AUTO_DAY_NIGHT_MODE, 0) + data_aa
                     sock.sendall(frame_aa)
-                    logger.debug(f"Sent Android Auto mode command: {mode_str}")
+                    logger.debug(f"Sent Android Auto explicit command: {mode_str}")
                 except NameError:
                     logger.error("API 1.1 symbols missing in Api_pb2. Cannot set Android Auto mode.")
                 except Exception as e_aa:
                     logger.warning(f"Sent System mode, but failed to set Android Auto: {e_aa}")
 
             sock.close()
-            logger.info(f"API call successful: Set System (and AA={sync_android_auto}) to {mode_str}.")
+            logger.info(f"API call successful: Set System (AA={sync_android_auto}) to {mode_str}.")
             return True
             
         except Exception as e:
@@ -124,8 +129,8 @@ def load_config(config_path='/home/pi/config.json'):
             'light_status_can_id': config_data.get('can_ids', {}).get('light_status'),
             'day_night_mode': config_data.get('features', {}).get('day_night_mode', False),
             'initial_mode': config_data.get('features', {}).get('initial_mode', 'night'),
-            # NEW: Toggle to control if AA follows the headlights independently
-            'sync_android_auto': config_data.get('features', {}).get('sync_android_auto', True) 
+            # Restored: Defaults to False to preserve "Common" setting in Hudiy
+            'sync_android_auto': config_data.get('features', {}).get('sync_android_auto', False) 
         }
 
         if not config['zmq_publish_address']:
@@ -157,7 +162,7 @@ def main():
     # --- 1. Handle Initial Mode ---
     initial_mode_str = config.get('initial_mode', 'night').lower()
     is_initial_night = (initial_mode_str == 'night')
-    sync_aa = config.get('sync_android_auto', True)
+    sync_aa = config.get('sync_android_auto', False)
     
     logger.info(f"Day/Night feature enabled. Default: {initial_mode_str}. Sync AA: {sync_aa}")
 
@@ -197,7 +202,7 @@ def main():
             if not data_hex:
                 continue
 
-            # --- Logic Change: How we detect if we need to send ---
+            # --- Logic: Detect if we need to send ---
             first_message = last_msg_data is None
 
             if first_message or data_hex != last_msg_data:
@@ -219,7 +224,7 @@ def main():
                     
                     logger.info(f"State change required (CAN Value: {light_value}). Target: {mode_str}.")
                     
-                    # Update API Call with new Sync AA flag
+                    # Send API Call (AA is controlled via config flag)
                     if send_dark_mode(is_dark_mode_enabled, sync_android_auto=sync_aa):
                         light_status = new_light_status
                         last_msg_data = data_hex
