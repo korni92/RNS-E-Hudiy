@@ -1,5 +1,5 @@
 {
-  "platform": "A2",
+  "dis_type": "",
   "can_interface": "can0",
   "zmq": {
     "publish_address": "ipc:///run/rnse_control/can_stream.ipc",
@@ -14,8 +14,6 @@
     "tv_presence": "0x602",
     "fis_line1": "0x265",
     "fis_line2": "0x267",
-    "speed": "0x5A2",
-    "rpm": "0x5A0",
     "media_status": "0x6C1",
     "nav_status": "0x6C0",
     "mmi": "0x461",
@@ -37,9 +35,7 @@
       "enabled": true
     },
     "fis_display": {
-      "enabled": true,
-      "line1": "Crank",
-      "line2": "Shaft"
+      "enabled": true
     },
     "dis_mode": "nav",    
     "source_controls": true,
@@ -117,18 +113,7 @@
      "tv_mode_identifier": "0x37",
      "play_key": "KEY_X",
      "pause_key": "KEY_C"
-  },
-  "platforms": {
-    "A2": {
-      "R_CLAIM": [82, 5, 128, 0, 27, 64, 48],
-      "R_CLEAR": [82, 5, 2, 0, 27, 64, 48],
-      "WAIT_FOR_ACK": [83, 133]
-    },
-    "TT": {
-      "R_CLAIM": [82, 5, 128, 0, 0, 64, 88],
-      "R_CLEAR": [82, 5, 2, 0, 0, 64, 88],
-      "WAIT_FOR_ACK": [83, 132]
-    }
   }
 }
+
 
