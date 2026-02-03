@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# Audi DIS (Cluster) DDP Protocol Driver - V2.8
-#
-# Changes in V2.8:
-# - FIX: Added handler for Red DIS "Graphics ACK" packet [0x0B, 0x01, 0x00].
-#   This suppresses the "Received unexpected data packet" warning on Red Clusters.
+# Audi DIS (Cluster) DDP Protocol Driver - V4
+# Supporting White, Red and Color DIS
+# Changes:
+# - FIX: Color DIS resume logic. 
+#   Color clusters do not send Re-Init (2E). detecting 'Free' (7B 05) 
+#   is enough to immediately transition to READY.
 #
 import time
 import logging
@@ -13,100 +14,84 @@ import can
 from typing import List, Optional
 from enum import Enum, auto
 
-# Get the logger for this module
 logger = logging.getLogger(__name__)
 
-# --- Custom Exceptions ---
-
 class DDPError(Exception):
-    """Base exception for DDP errors."""
     pass
 
 class DDPCANError(DDPError):
-    """Error related to CAN bus setup or communication."""
     pass
 
 class DDPAckTimeoutError(DDPError):
-    """Raised when an ACK is not received in time."""
     pass
 
 class DDPHandshakeError(DDPError):
-    """Raised when a handshake or initialization step fails."""
     pass
 
-
-# --- Protocol State & Mode ---
-
 class DDPState(Enum):
-    """Defines the connection state."""
     DISCONNECTED = auto()
-    SESSION_ACTIVE = auto()  # Keep-Alive (A-packets) session is open
-    INITIALIZING = auto()    # DDP (B/1x/2x packets) handshake in progress
-    READY = auto()           # Ready to send/receive data frames
-    PAUSED = auto()          # Cluster claimed screen (Warning/Menu)
+    SESSION_ACTIVE = auto()
+    INITIALIZING = auto()
+    READY = auto()
+    PAUSED = auto()
 
 class DisMode(Enum):
-    """Defines the detected cluster type."""
     UNKNOWN = auto()
     WHITE = auto()
     RED = auto()
-
-# --- Message Constants ---
+    COLOR_TYPE1 = auto()
+    COLOR_TYPE2 = auto()
 
 class DDPMessages:
-    """Constants for specific DDP protocol messages."""
-    # Cluster is busy (Warning/Menu active)
-    STAT_BUSY_HALF       = [0x53, 0x84]
-    STAT_BUSY_WARN_HALF  = [0x53, 0x04]
-    STAT_BUSY_FULL       = [0x53, 0x88]
-    STAT_BUSY_WARN_FULL  = [0x53, 0x08]
+    # Mono/Red Status (Prefix 0x53)
+    STAT_BUSY_HALF        = [0x53, 0x84]
+    STAT_BUSY_WARN_HALF   = [0x53, 0x04]
+    STAT_BUSY_FULL        = [0x53, 0x88]
+    STAT_BUSY_WARN_FULL   = [0x53, 0x08]
+    STAT_FREE_HALF        = [0x53, 0x05]
+    STAT_FREE_FULL        = [0x53, 0x0A]
+    
+    # Color Status (Prefix 0x7B)
+    STAT_COLOR_BUSY_HALF       = [0x7B, 0x84]
+    STAT_COLOR_BUSY_WARN_HALF  = [0x7B, 0x04]
+    STAT_COLOR_BUSY_FULL       = [0x7B, 0x88]
+    STAT_COLOR_BUSY_WARN_FULL  = [0x7B, 0x08]
+    STAT_COLOR_FREE_HALF       = [0x7B, 0x05]
+    STAT_COLOR_FREE_FULL       = [0x7B, 0x0A]
+    STAT_COLOR_OK              = [0x7B, 0x85]
 
-    # Cluster is free (Warning cleared)
-    STAT_FREE_HALF       = [0x53, 0x05]
-    STAT_FREE_FULL       = [0x53, 0x0A]
-
-    # Graphics Acknowledgments (Benign)
     STAT_GRAPHIC_ACK_WHITE = [0x0B, 0x03, 0x57]
     STAT_GRAPHIC_ACK_RED   = [0x0B, 0x01, 0x00]
-
-    # Re-Initialization Request (Sent by Cluster)
-    CMD_REINIT_REQ       = [0x2E] 
-    # Re-Initialization Confirmation (We send this back)
-    CMD_REINIT_CONF      = [0x2F]
-
+    CMD_REINIT_REQ        = [0x2E] 
+    CMD_REINIT_CONF       = [0x2F]
 
 class DDPProtocol:
-    """
-    Handles the low-level DDP protocol state machine and CAN bus communication.
-    Supports both White and Red DIS clusters via auto-detection.
-    """
-
-    # --- CAN & Protocol Constants ---
     CAN_ID_SEND = 0x6C0
     CAN_ID_RECV = 0x6C1
     CAN_MASK_RECV = 0x7FF
-    CAN_PACING_DELAY_S = 0.002  # Critical 2ms pacing delay for packets
 
-    # -- Keep-Alive (KA) Payloads --
-    KA_WHITE_OPEN = [0xA0, 0x0F, 0x8A, 0xFF, 0x4A, 0xFF]  # Session Open Request
-    KA_WHITE_ACCEPT = [0xA1, 0x0F, 0x8A, 0xFF, 0x4A, 0xFF] # Session Accept / Pong
-    KA_KEEP_PING = [0xA3]                                  # Keep-Alive Ping (We send)
-    KA_CLOSE = [0xA8]                                      # Session Close
+    DEFAULT_BS = 0x0F 
+    DEFAULT_T1_MS = 100 
+    DEFAULT_T3_MS = 5 
+    DEFAULT_ACK_TIMEOUT_MS = 500
+    DEFAULT_PACING_DELAY_S = 0.005
 
-    KA_RED_PRESENT = [0xA0, 0x07, 0x00]                    # Cluster broadcast
-    KA_RED_OPEN = [0xA1, 0x0F]                             # Our reply to PRESENT
-    KA_RED_ACCEPT = [0xA1, 0x0F]                           # Cluster reply to PING
+    KA_WHITE_OPEN = [0xA0, 0x0F, 0x8A, 0xFF, 0x4A, 0xFF]
+    KA_WHITE_ACCEPT = [0xA1, 0x0F, 0x8A, 0xFF, 0x4A, 0xFF]
+    KA_KEEP_PING = [0xA3]
+    KA_CLOSE = [0xA8]
+    KA_RED_PRESENT = [0xA0, 0x07, 0x00]
+    KA_COLOR_PRESENT = [0xA0, 0x0F, 0x00]
+    KA_RED_OPEN = [0xA1, 0x0F]
+    KA_RED_ACCEPT = [0xA1, 0x0F]
+    KA_SIMPLE_ACCEPT = [0xA1, 0x0F]
 
-    # -- DDP Packet Type Masks --
     PKT_TYPE_MASK = 0xF0
     PKT_SEQ_MASK = 0x0F
-    PKT_TYPE_DATA_END = 0x10  # 0x1x (end of frame, expects ACK)
-    PKT_TYPE_DATA_BODY = 0x20 # 0x2x (frame body, no ACK)
-    PKT_TYPE_ACK = 0xB0       # 0xBx (ACK)
-    
-    # -- Block Limits --
-    # Vlad's Limit: Clusters corrupt data if >6 frames (42 bytes) are sent without ACK.
-    MAX_BYTES_PER_BLOCK = 42
+    PKT_TYPE_DATA_END = 0x10
+    PKT_TYPE_DATA_BODY = 0x20
+    PKT_TYPE_ACK = 0xB0
+    PKT_TYPE_DATA_CONTINUE = 0x00
 
     def __init__(self, config: dict):
         self.cfg = config
@@ -115,670 +100,519 @@ class DDPProtocol:
         self.i_am_opener = False
         self.last_ka_sent = 0.0
         self.send_seq_num = 0
-
-        # For _recv_specific to store stray packets
-        self._last_received_ack = None
-        self._last_received_data = None
-
+        self.opcode_offset = 0x00
+        self.coord_bytes = 1
+        self._rx_buffer_ack = None
+        self.current_payload = []
+        self.pending_payload = None
+        self.region = None
+        self.tp_version = None 
+        self.bs = self.DEFAULT_BS
+        self.t1_ms = self.DEFAULT_T1_MS
+        self.t3_ms = self.DEFAULT_T3_MS
+        self.ack_timeout_ms = self.DEFAULT_ACK_TIMEOUT_MS
+        self.pacing_delay_s = self.DEFAULT_PACING_DELAY_S
+        self.ka_format_long = False
+        
         self.channel = config.get('can_channel', 'can0')
         self.bitrate = config.get('can_bitrate', 100000)
-        
-        logger.debug(f"CAN config: {{'bitrate': {self.bitrate}, 'interface': 'socketcan', 'channel': '{self.channel}'}}")
         
         try:
             self.bus = can.Bus(
                 interface='socketcan',
                 channel=self.channel,
                 bitrate=self.bitrate,
-                timeout=0.01  # Non-blocking
+                timeout=0.01 
             )
             self.bus.set_filters([
                 {"can_id": self.CAN_ID_RECV, "can_mask": self.CAN_MASK_RECV, "extended": False}
             ])
         except Exception as e:
-            logger.error(f"Failed to open CAN-Bus '{self.channel}': {e}")
-            logger.error(f"Make sure '{self.channel}' is up (e.g., sudo ip link set {self.channel} up type can bitrate {self.bitrate})")
+            logger.error(f"Failed to open CAN-Bus: {e}")
             raise DDPCANError(f"Failed to open CAN bus: {e}")
 
     def __del__(self):
-        """Shuts down the CAN bus connection on exit."""
         if hasattr(self, 'bus'):
-            logger.debug("Shutting down CAN bus.")
-            self.bus.shutdown()
-
-    # --- State and Helper Functions ---
+            try:
+                self.bus.shutdown()
+            except: pass
 
     def _set_state(self, new_state: DDPState):
-        """Centralized state transition function."""
-        if self.state == new_state:
-            return
-        
+        if self.state == new_state: return
         logger.info(f"State transition: {self.state.name} -> {new_state.name}")
+        old_state = self.state
         self.state = new_state
-        
-        # Reset context on disconnection
         if new_state == DDPState.DISCONNECTED:
             self.dis_mode = DisMode.UNKNOWN
             self.i_am_opener = False
             self.send_seq_num = 0
+            self.opcode_offset = 0
+            self.coord_bytes = 1
+            self.current_payload = []
+            self.pending_payload = None
+            self.region = None
+        if new_state == DDPState.READY and old_state == DDPState.PAUSED:
+            self._restore_screen()
+
+    def _restore_screen(self):
+        if self.pending_payload is not None:
+            logger.info("Restoring screen with pending payload.")
+            self.send_ddp_frame(self.pending_payload)
+        elif self.current_payload:
+            logger.info("Restoring screen with current payload.")
+            self.send_ddp_frame(self.current_payload)
+        else:
+            logger.debug("No payload to restore.")
 
     def payload_is(self, data: List[int], expected_payload: List[int]) -> bool:
-        """Helper to check payload regardless of the sequence number (first byte)."""
         if not data or len(data) < 1: return False
         return data[1:] == expected_payload
 
-    # --- Low-Level CAN & DDP I/O ---
+    def decode_time(self, byte: int) -> float:
+        units = byte >> 6
+        scale = byte & 0x3F
+        base_ms = 0.1 * (10 ** units)
+        return base_ms * scale
+
+    def encode_time(self, ms: float) -> int:
+        for units in range(4):
+            base_ms = 0.1 * (10 ** units)
+            scale = ms / base_ms
+            if scale == int(scale) and 0 <= scale <= 63:
+                return (units << 6) | int(scale)
+        raise DDPError(f"Cannot encode time {ms} ms")
+
+    def parse_params(self, data: List[int]):
+        if data[0] not in [0xA0, 0xA1]:
+            return
+        self.bs = min(self.bs, data[1])
+        self.MAX_BYTES_PER_BLOCK = (self.bs - 1) * 7
+        if len(data) == 6:
+            self.tp_version = 2.0
+            self.t1_ms = self.decode_time(data[2])
+            self.t3_ms = self.decode_time(data[4])
+            self.ack_timeout_ms = int(self.t1_ms)
+            self.pacing_delay_s = self.t3_ms / 1000.0
+            self.ka_format_long = True
+            logger.debug(f"Parsed TP2.0 params: BS={self.bs:02X}, T1={self.t1_ms}ms, T3={self.t3_ms}ms")
+        elif len(data) in [2, 3]:
+            self.tp_version = 1.6
+            self.ka_format_long = False
+            logger.debug(f"Parsed TP1.6 params: BS={self.bs:02X}")
+        else:
+            logger.warning(f"Invalid params length {len(data)}")
+
+    def build_a1(self) -> List[int]:
+        if self.ka_format_long or self.tp_version == 2.0:
+            t1_b = self.encode_time(self.t1_ms)
+            t3_b = self.encode_time(self.t3_ms)
+            return [0xA1, self.bs, t1_b, 0xFF, t3_b, 0xFF]
+        else:
+            return [0xA1, self.bs]
 
     def send_can(self, can_id: int, data: List[int]):
-        """Sends a raw CAN message to the bus with pacing."""
-        data_hex = ' '.join(f'{b:02X}' for b in data)
-        logger.debug("-> 0x%03X: %s", can_id, data_hex)
         try:
             msg = can.Message(arbitration_id=can_id, data=data, is_extended_id=False)
             self.bus.send(msg)
-            time.sleep(self.CAN_PACING_DELAY_S) # Critical pacing delay
+            time.sleep(self.pacing_delay_s)
         except Exception as e:
             logger.error(f"CAN Send Error: {e}")
             raise DDPCANError(f"CAN Send Error: {e}")
 
     def _recv(self, timeout_s: float = 0.01) -> Optional[List[int]]:
-        """Receives and logs a single CAN message from the bus (ID 0x6C1)."""
         msg = self.bus.recv(timeout_s)
-        if msg:
-            if msg.arbitration_id == self.CAN_ID_RECV:
-                data = list(msg.data)
-                logger.debug("<- 0x%03X: %s", self.CAN_ID_RECV, ' '.join(f'{b:02X}' for b in data))
-                time.sleep(self.CAN_PACING_DELAY_S)
-                return data
+        if msg and msg.arbitration_id == self.CAN_ID_RECV:
+            data = list(msg.data)
+            time.sleep(self.pacing_delay_s)
+            return data
         return None
 
     def send_ack(self, received_seq_num: int):
-        """Sends a DDP ACK (0xB0 + seq+1) for a received packet."""
         ack_seq = (received_seq_num + 1) % 16
         ack_packet = [self.PKT_TYPE_ACK + ack_seq]
-        logger.debug(f"Sending ACK {ack_packet[0]:02X}")
         self.send_can(self.CAN_ID_SEND, ack_packet)
 
     def _handle_incoming_packet(self, data: List[int]) -> bool:
-        """
-        Central handler for all "background" packets (Keep-Alives, ACKs, etc.).
-        Returns True if the packet was handled, False if it's a data packet.
-        """
-        if not data:
-            return False
-
+        if not data: return False
         msg_type_prefix = data[0] & self.PKT_TYPE_MASK
         
-        # --- Type 0xA_ (Session Control) ---
         if msg_type_prefix == 0xA0:
             if data == self.KA_CLOSE:
-                logger.warning("Cluster sent A8 (Close) -> closing session")
                 self._set_state(DDPState.DISCONNECTED)
                 return True
-            
-            # Session drop detection
-            if data == self.KA_RED_PRESENT and self.dis_mode == DisMode.RED and self.state == DDPState.READY:
-                logger.warning("Red DIS broadcast detected while READY. Session dropped.")
+            if (data == self.KA_RED_PRESENT or data == self.KA_COLOR_PRESENT) and self.state == DDPState.READY:
+                logger.warning("Broadcast detected while READY. Session dropped.")
                 self._set_state(DDPState.DISCONNECTED)
                 return True
-
-            # Cluster Ping (0xA3 or 0xA3 00, etc.)
             if data[0] == self.KA_KEEP_PING[0]:
-                logger.debug(f"Cluster sent Keep-Alive {data} -> replying A1")
-                reply = self.KA_RED_ACCEPT if self.dis_mode == DisMode.RED else self.KA_WHITE_ACCEPT
+                reply = self.build_a1()
                 self.send_can(self.CAN_ID_SEND, reply)
                 return True
-            
-            # Cluster Pong (to our Ping)
             if (data == self.KA_WHITE_ACCEPT or data == self.KA_RED_ACCEPT) and self.i_am_opener:
-                logger.debug("Cluster replied A1 to our A3")
                 return True
-            
-            # Ignore unhandled 0xA_ packets
-            return True # Assume it was session-related
+            return True 
 
-        # --- Type 0xB_ (ACK) ---
         if msg_type_prefix == self.PKT_TYPE_ACK:
-            logger.debug(f"<- Received ACK {data[0]:02X}")
-            self._last_received_ack = data # Store for _recv_specific
+            self._rx_buffer_ack = data 
             return True
 
-        # --- Type 0x0_, 0x1_, 0x2_ (Data) ---
         if msg_type_prefix in [0x00, self.PKT_TYPE_DATA_END, self.PKT_TYPE_DATA_BODY]:
-            return False # Not handled, it's data for the caller
+            return False 
 
-        logger.warning(f"Unknown unhandled packet type {data[0]:02X}")
-        return True # Treat as handled to avoid breaking loops
+        # We allow status messages (53 xx or 7B xx) to be handled by the poller
+        if data[0] == 0x53 or data[0] == 0x7B:
+            return False
+
+        logger.warning(f"Unknown packet type {data[0]:02X}")
+        return True 
 
     def _recv_specific(self, expected_data: List[int], timeout_ms: int) -> Optional[List[int]]:
-        """
-        Waits for a *specific* CAN packet (e.g., an ACK or KA packet).
-        Uses _handle_incoming_packet to filter out background noise.
-        """
         start = time.time()
-        self._last_received_ack = None # Clear buffer
+        self._rx_buffer_ack = None
+        while time.time() - start < (timeout_ms / 1000.0):
+            data = self._recv(0.05)
+            if not data: continue
+            
+            if data == expected_data: return data
+            
+            is_bg = self._handle_incoming_packet(data)
+            
+            if not is_bg:
+                msg_type = data[0] & self.PKT_TYPE_MASK
+                msg_seq = data[0] & self.PKT_SEQ_MASK
+                
+                if msg_type in [0x00, self.PKT_TYPE_DATA_END]:
+                    self.send_ack(msg_seq)
+            
+            if self.state == DDPState.DISCONNECTED: return None
+        return None
+
+    def _recv_message_chain(self, timeout_ms: int) -> Optional[List[int]]:
+        start = time.time()
+        payload_buffer = []
 
         while time.time() - start < (timeout_ms / 1000.0):
-            data = self._recv(0.05) # Poll for 50ms
-            if not data:
-                continue
-            
-            # First, check if it's the packet we are waiting for
-            if data == expected_data:
-                logger.debug(f"<- Received expected {expected_data}")
-                return data
-            
-            # If not, let the central handler process it (handles ACKs, Pings, etc.)
-            self._handle_incoming_packet(data)
+            data = self._recv(0.05)
+            if not data: continue
 
-            # If we went to DISCONNECTED state, abort
-            if self.state == DDPState.DISCONNECTED:
-                logger.warning("Session closed while waiting for specific packet")
-                return None
-                    
-        logger.error(f"Timeout waiting for {expected_data}")
+            is_bg = self._handle_incoming_packet(data)
+            if is_bg: 
+                if self.state == DDPState.DISCONNECTED: return None
+                continue
+
+            msg_type = data[0] & self.PKT_TYPE_MASK
+            msg_seq = data[0] & self.PKT_SEQ_MASK
+
+            if msg_type == self.PKT_TYPE_DATA_BODY:
+                payload_buffer.extend(data[1:])
+            elif msg_type in [0x00, self.PKT_TYPE_DATA_END]:
+                payload_buffer.extend(data[1:])
+                self.send_ack(msg_seq)
+                return payload_buffer
+
         return None
 
     def _recv_and_ack_data(self, timeout_ms: int) -> Optional[List[int]]:
-        """
-        Waits for a data packet (0x0x, 0x1x, 0x2x), ACKs it if required,
-        and returns the full packet.
-        Uses _handle_incoming_packet to filter out background noise.
-        """
-        start = time.time()
-        self._last_received_data = None # Clear buffer
-
-        while time.time() - start < (timeout_ms / 1000.0):
-            data = self._recv(0.05) # Poll for 50ms
-            if not data:
-                continue
-
-            # Let the central handler process it first
-            is_background_packet = self._handle_incoming_packet(data)
-            
-            if self.state == DDPState.DISCONNECTED:
-                logger.warning("Session closed while waiting for data packet")
-                return None
-
-            if is_background_packet:
-                continue # It was an ACK or KA, keep waiting for data
-
-            # If it wasn't a background packet, it must be data.
-            msg_type = data[0] & self.PKT_TYPE_MASK
-            msg_seq = data[0] & self.PKT_SEQ_MASK
-            
-            if msg_type in [0x00, self.PKT_TYPE_DATA_END]:
-                self.send_ack(msg_seq)
-                return data
-            elif msg_type == self.PKT_TYPE_DATA_BODY:
-                return data
-            else:
-                logger.warning(f"Received non-data packet {data} when expecting data")
-                
-        logger.error(f"Timeout waiting for a data packet")
+        data = self._recv_message_chain(timeout_ms)
+        if data: return [0x00] + data
         return None
 
+    def resync(self, original_packet: List[int], original_seq: int, next_expected: int):
+        num_dummies = (original_seq - next_expected) % 16
+        if num_dummies == 0:
+            logger.warning("Wrong ACK but num_dummies=0, skipping resync.")
+            return
+        logger.info(f"Performing sequence resync: {num_dummies} dummies, from seq {next_expected:02X} to {original_seq:02X}")
+        self.send_seq_num = next_expected
+        dummy_data = [0x00] * 7
+        block_count = 0
+        while num_dummies > 0:
+            if block_count == self.bs - 1:
+                pkt_type = self.PKT_TYPE_DATA_CONTINUE 
+                first_byte = pkt_type + self.send_seq_num
+                packet = [first_byte] + dummy_data
+                self.send_can(self.CAN_ID_SEND, packet)
+                expected_ack_byte = self.PKT_TYPE_ACK + (self.send_seq_num + 1) % 16
+                if not self._recv_specific([expected_ack_byte], self.ack_timeout_ms):
+                    raise DDPAckTimeoutError("Resync ACK timeout")
+                self.send_seq_num = (self.send_seq_num + 1) % 16
+                num_dummies -= 1
+                block_count = 0
+            else:
+                pkt_type = self.PKT_TYPE_DATA_BODY
+                first_byte = pkt_type + self.send_seq_num
+                packet = [first_byte] + dummy_data
+                self.send_can(self.CAN_ID_SEND, packet)
+                self.send_seq_num = (self.send_seq_num + 1) % 16
+                num_dummies -= 1
+                block_count += 1
+
     def send_data_packet(self, data: List[int], is_multi_packet_frame_body: bool = False):
-        """
-        Sends a single DDP data packet.
-        Handles sequence numbers and waits for ACK on 0x1x (end-of-frame) packets.
-        Raises DDPAckTimeoutError on failure.
-        """
         packet_type = self.PKT_TYPE_DATA_BODY if is_multi_packet_frame_body else self.PKT_TYPE_DATA_END
         first_byte = packet_type + self.send_seq_num
         packet = [first_byte] + data
+        original_seq = self.send_seq_num
+        self.send_seq_num = (self.send_seq_num + 1) % 16
         
         self.send_can(self.CAN_ID_SEND, packet)
         
-        expected_ack_byte = self.PKT_TYPE_ACK + (self.send_seq_num + 1) % 16
-        self.send_seq_num = (self.send_seq_num + 1) % 16
-        
         if is_multi_packet_frame_body:
-            return # 0x2x packets are not ACKed
+            return 
         
-        # Wait for the specific ACK
-        if self._recv_specific([expected_ack_byte], 500):
+        expected_ack_byte = self.PKT_TYPE_ACK + self.send_seq_num 
+        
+        ack_data = self._recv_specific([expected_ack_byte], self.ack_timeout_ms)
+        if ack_data:
             return
-        else:
-            logger.warning(f"Timeout waiting for ACK {expected_ack_byte:02X} after sending {packet[0]:02X}")
-            raise DDPAckTimeoutError(f"Timeout waiting for ACK {expected_ack_byte:02X}")
-
-    # --- Public API Methods ---
+        elif self._rx_buffer_ack:
+            received_ack_byte = self._rx_buffer_ack[0]
+            if received_ack_byte != expected_ack_byte:
+                next_expected = received_ack_byte & 0x0F
+                self.resync(packet, original_seq, next_expected)
+                if self._recv_specific([expected_ack_byte], self.ack_timeout_ms):
+                    return
+                else:
+                    raise DDPAckTimeoutError(f"Timeout after resync for ACK {expected_ack_byte:02X}")
+        raise DDPAckTimeoutError(f"Timeout waiting for ACK {expected_ack_byte:02X}")
 
     def send_ddp_frame(self, payload: List[int]) -> bool:
-        """
-        Sends a full DDP data payload.
-        CRITICAL: Splits large payloads into multiple 'Blocks' of max 42 bytes.
-        AND enforces an inter-block delay to allow the cluster to process buffer.
-        """
+        if not payload: return True
         if self.state != DDPState.READY:
-            logger.warning("Attempted to send frame while not READY. Ignoring.")
+            logger.warning("Not READY, storing as pending payload.")
+            self.pending_payload = payload[:]
             return False
-        if not payload:
-            return True
         
-        # 1. Chunk the application payload into Protocol Blocks (Max 42 bytes)
         payload_blocks = [payload[i:i + self.MAX_BYTES_PER_BLOCK] for i in range(0, len(payload), self.MAX_BYTES_PER_BLOCK)]
 
         try:
             for block in payload_blocks:
-                # 2. Split each block into 7-byte CAN segments
                 chunks = [block[i:i + 7] for i in range(0, len(block), 7)]
                 if not chunks: continue
-
                 last_chunk = chunks.pop()
-
-                # Send Body Frames (0x2x) - No ACK
                 for chunk in chunks:
                     self.send_data_packet(chunk, is_multi_packet_frame_body=True)
-                
-                # Send End Frame (0x1x) - Waits for ACK
                 self.send_data_packet(last_chunk, is_multi_packet_frame_body=False)
-                
-                # 3. INTER-BLOCK PACING
-                # Critical for White DIS: Pause after ACK to let the cluster CPU catch up.
-                # This creates the "piece by piece" transmission style of RNS-E.
-                if self.dis_mode == DisMode.WHITE:
-                    time.sleep(0.02) # 20ms delay between blocks
-            
+                if self.dis_mode == DisMode.WHITE: time.sleep(0.02)
+            self.current_payload = payload[:]
+            self.pending_payload = None
+            return True
         except (DDPAckTimeoutError, DDPCANError) as e:
-            logger.error(f"Failed to send DDP frame: {e}. Session closing.")
+            logger.error(f"Failed to send DDP frame: {e}")
             self._set_state(DDPState.DISCONNECTED)
-            return False
-            
-        return True
-
-    def _white_dis_passive_open(self) -> bool:
-        """(Private) Waits for the White DIS Cluster to initiate (sends A0)."""
-        logger.info("PASSIVE WHITE: Waiting for cluster A0...")
-        data = self._recv_specific(self.KA_WHITE_OPEN, 1000)
-        if data == self.KA_WHITE_OPEN:
-            logger.info("Cluster opened -> sending A1")
-            self.send_can(self.CAN_ID_SEND, self.KA_WHITE_ACCEPT)
-            self.i_am_opener = False
-            self._set_state(DDPState.SESSION_ACTIVE)
-            self.dis_mode = DisMode.WHITE
-            return True
-        return False
-
-    def _white_dis_active_open(self) -> bool:
-        """(Private) Actively initiates the White DIS session by sending A0."""
-        logger.info("ACTIVE WHITE: Sending A0...")
-        self.send_can(self.CAN_ID_SEND, self.KA_WHITE_OPEN)
-        if self._recv_specific(self.KA_WHITE_ACCEPT, 500):
-            logger.info("A1 received")
-            self.i_am_opener = True
-            self._set_state(DDPState.SESSION_ACTIVE)
-            self.dis_mode = DisMode.WHITE
-            return True
-        return False
-
-    def _red_dis_open(self) -> bool:
-        """(Private) Performs the handshake for an Old Red DIS cluster."""
-        logger.info("RED DIS: Detected cluster broadcast. Starting Red DIS handshake.")
-        
-        try:
-            # Step 1: Send A1 0F
-            logger.info("RED DIS: Sending A1 0F...")
-            self.send_can(self.CAN_ID_SEND, self.KA_RED_OPEN)
-            
-            # Step 2: Send A3 right after
-            logger.info("RED DIS: Sending A3...")
-            self.send_can(self.CAN_ID_SEND, self.KA_KEEP_PING)
-            
-            # Step 3: Wait for cluster's A1 0F reply
-            if not self._recv_specific(self.KA_RED_ACCEPT, 500):
-                raise DDPHandshakeError("Cluster did not reply with A1 0F")
-            logger.info("RED DIS: Received A1 0F reply from cluster.")
-            
-            # Step 4: Exchange A3 / A1 0F four times
-            for i in range(4):
-                logger.info(f"RED DIS: Sending A3 (Loop {i+1}/4)...")
-                self.send_can(self.CAN_ID_SEND, self.KA_KEEP_PING)
-                if not self._recv_specific(self.KA_RED_ACCEPT, 500):
-                    raise DDPHandshakeError(f"Cluster did not reply on loop {i+1}")
-                logger.info(f"RED DIS: Received A1 0F (Loop {i+1}/4).")
-            
-            logger.info("RED DIS: Handshake complete. Session is active.")
-            self.i_am_opener = True
-            self._set_state(DDPState.SESSION_ACTIVE)
-            self.dis_mode = DisMode.RED
-            return True
-
-        except Exception as e:
-            logger.error(f"RED DIS: Handshake failed with error: {e}")
             return False
 
     def detect_and_open_session(self) -> bool:
-        """
-        Detects cluster type (Red or White) and establishes a Keep-Alive session.
-        This is Step 1 of the connection.
-        """
-        if self.state != DDPState.DISCONNECTED:
-            logger.warning("Session already open.")
-            return True
-            
-        logger.info("Detecting cluster type (Red or White)...")
+        if self.state != DDPState.DISCONNECTED: return True
+        logger.info("Detecting cluster type...")
         
-        # Listen for 1.5 seconds to see what's on the bus
+        # 1. Passive Listen
         start = time.time()
-        while time.time() - start < 1.5:
-            data = self._recv(0.1) # Poll every 100ms
-            if not data:
-                continue
-            
-            # --- Red DIS Detection ---
-            if data == self.KA_RED_PRESENT:
-                logger.info("Found Red DIS broadcast (A0 07 00).")
-                return self._red_dis_open()
-                
-            # --- White DIS (Passive) Detection ---
-            if data == self.KA_WHITE_OPEN:
-                logger.info("Found White DIS passive open (A0 0F...).")
-                self.send_can(self.CAN_ID_SEND, self.KA_WHITE_ACCEPT)
+        while time.time() - start < 1.0: 
+            data = self._recv(0.1)
+            if not data: continue
+            if data[0] == 0xA0:
+                logger.info("Detected A0 open request.")
+                self.parse_params(data)
+                reply = self.build_a1()
+                self.send_can(self.CAN_ID_SEND, reply)
                 self.i_am_opener = False
                 self._set_state(DDPState.SESSION_ACTIVE)
-                self.dis_mode = DisMode.WHITE
+                if len(data) == 6:
+                    self.dis_mode = DisMode.WHITE
+                    self.ka_format_long = True
+                else:
+                    self.dis_mode = DisMode.UNKNOWN  
+                    self.ka_format_long = False
                 return True
         
-        # --- No broadcast detected ---
-        # Assume White DIS, try Active Open
-        logger.info("No Red DIS broadcast. Assuming White DIS, attempting Active Open.")
-        return self._white_dis_active_open()
+        # 2. Active Open (TP2.0)
+        logger.info("No broadcast. Attempting Active Open with TP2.0.")
+        our_a0 = self.KA_WHITE_OPEN
+        self.send_can(self.CAN_ID_SEND, our_a0)
+        
+        start = time.time()
+        while time.time() - start < 0.5:
+            data = self._recv(0.05)
+            if not data: continue
+            if data[0] == 0xA1:
+                self.parse_params(data)
+                if len(data) == 6:
+                    logger.info("A1 (Long) received - White DIS detected.")
+                    self.ka_format_long = True
+                    self.dis_mode = DisMode.WHITE
+                else:
+                    logger.info("A1 (Short) received - Color or Red DIS detected.")
+                    self.ka_format_long = False
+                    self.dis_mode = DisMode.UNKNOWN
+                self.i_am_opener = True
+                self._set_state(DDPState.SESSION_ACTIVE)
+                return True
+            self._handle_incoming_packet(data)
+        
+        # 3. Active Open (TP1.6)
+        logger.info("No TP2.0 response. Attempting TP1.6 Active Open.")
+        our_a0_short = [0xA0, self.bs, 0x00]
+        self.send_can(self.CAN_ID_SEND, our_a0_short)
+        
+        start = time.time()
+        while time.time() - start < 0.5:
+            data = self._recv(0.05)
+            if not data: continue
+            if data[0] == 0xA1:
+                self.parse_params(data)
+                logger.info("A1 (TP1.6) received - Red DIS detected.")
+                self.ka_format_long = False
+                self.dis_mode = DisMode.RED
+                self.i_am_opener = True
+                self._set_state(DDPState.SESSION_ACTIVE)
+                return True
+            self._handle_incoming_packet(data)
+        return False
 
     def close_session(self):
-        """Actively closes the DDP session by sending A8 (Hard Close)."""
         if self.state != DDPState.DISCONNECTED:
-            logger.info("Actively closing session (sending A8)...")
+            logger.info("Closing session (A8).")
             self.send_can(self.CAN_ID_SEND, self.KA_CLOSE)
             self._set_state(DDPState.DISCONNECTED)
 
     def release_screen(self) -> bool:
-        """
-        Sends a 'Release Screen' command (0x33) to the cluster.
-        """
-        if self.state != DDPState.READY:
-            logger.warning("Cannot release screen, session not READY.")
-            return False
-        
-        logger.info("Releasing DIS screen to Bordcomputer (sending 0x33)...")
-        payload = [0x33]
+        if self.state != DDPState.READY: return False
         try:
-            self.send_data_packet(payload, is_multi_packet_frame_body=False)
-            logger.info("Screen released. Session remains open.")
+            self.send_data_packet([0x33])
             return True
-        except (DDPAckTimeoutError, DDPCANError) as e:
-            logger.error(f"Failed to send release screen packet: {e}. Session may be dead.")
+        except Exception:
             self._set_state(DDPState.DISCONNECTED)
             return False
-
-    # --- Initialization (Step 2) ---
-
-    def _get_init_payloads(self) -> dict:
-        """Returns the correct set of payloads based on self.dis_mode."""
-        PL_LOG_3 = [0x00, 0x01]
-        PL_LOG_5 = [0x00, 0x01]
-        PL_LOG_23_COMMON = [0x21, 0x3B, 0xA0, 0x00]
-
-        if self.dis_mode == DisMode.WHITE:
-            logger.debug("Using WHITE DIS payload set.")
-            return {
-                "PL_LOG_3": PL_LOG_3,
-                "PL_LOG_5": PL_LOG_5,
-                "PL_LOG_11": [0x09, 0x20, 0x0B, 0x50, 0x0A, 0x24, 0x50],
-                "PL_LOG_14": [0x30, 0x39, 0x00, 0x30, 0x00],
-                "PL_LOG_18": [0x09, 0x20, 0x0B, 0x50, 0x0A, 0x24, 0x50],
-                "PL_LOG_21": [0x30, 0x39, 0x00, 0x30, 0x00],
-                "PL_LOG_23": PL_LOG_23_COMMON,
-                "PL_LOG_27": [0x21, 0x3B, 0xA0, 0x00]
-            }
-        else: # DisMode.RED
-            logger.debug("Using RED DIS payload set.")
-            return {
-                "PL_LOG_3": PL_LOG_3,
-                "PL_LOG_5": PL_LOG_5,
-                "PL_LOG_11": [0x09, 0x20, 0x0B, 0x50, 0x00, 0x32, 0x44],
-                "PL_LOG_14": [0x30, 0x33, 0x00, 0x31, 0x00],
-                "PL_LOG_23": PL_LOG_23_COMMON,
-                # Other payloads not needed for the shorter Red path
-                "PL_LOG_18": [],
-                "PL_LOG_21": [],
-                "PL_LOG_27": []
-            }
-
-    def _init_common_start(self):
-        """Sends the first 4 packets common to all handshakes."""
-        self.send_data_packet([0x15, 0x01, 0x01, 0x02, 0x00, 0x00]) # Step 1
-        logger.info("Init 1/x passed!")
-
-        data = self._recv_and_ack_data(1000) # Step 2
-        if not self.payload_is(data, self.PL["PL_LOG_3"]):
-            raise DDPHandshakeError(f"Step 2 failed: wait PL {self.PL['PL_LOG_3']}, got {data}")
-        logger.info("Init 2/x passed!")
-
-        self.send_data_packet([0x01, 0x01, 0x00]) # Step 3
-        logger.info("Init 3/x passed!")
-
-        self.send_data_packet([0x08]) # Step 4
-        logger.info("Init 4/x passed!")
-
-    def _init_path_b_white(self):
-        """Handles the short White DIS handshake path."""
-        logger.info("Following Path B (White Short)...")
-        self.send_data_packet([0x20, 0x3B, 0xA0, 0x00]) # Step 5
-        logger.info("Init 5/x (Path B) passed!")
-
-    def _init_path_c_white(self):
-        """Handles the long White DIS handshake path."""
-        logger.info("Following Path C (White Long)...")
-        self.send_data_packet([0x01, 0x01, 0x00]) # Step 5
-        logger.info("Init 5/x passed!")
-        
-        data = self._recv_and_ack_data(1000) # Step 6
-        if not self.payload_is(data, self.PL["PL_LOG_14"]):
-            raise DDPHandshakeError(f"Step 6 failed: wait PL {self.PL['PL_LOG_14']}, got {data}")
-        logger.info("Init 6/x passed!")
-        
-        self.send_data_packet([0x08]) # Step 7
-        logger.info("Init 7/x passed!")
-
-        data = self._recv_and_ack_data(1000) # Step 8
-        if not self.payload_is(data, self.PL["PL_LOG_18"]):
-            raise DDPHandshakeError(f"Step 8 failed: wait PL {self.PL['PL_LOG_18']}, got {data}")
-        logger.info("Init 8/x passed!")
-
-        self.send_data_packet([0x20, 0x3B, 0xA0, 0x00]) # Step 9
-        logger.info("Init 9/x passed!")
-
-        data = self._recv_and_ack_data(1000) # Step 10
-        if not self.payload_is(data, self.PL["PL_LOG_21"]):
-            raise DDPHandshakeError(f"Step 10 failed: wait PL {self.PL['PL_LOG_21']}, got {data}")
-        logger.info("Init 10/x passed!")
-
-        data = self._recv_and_ack_data(1000) # Step 11
-        if not self.payload_is(data, self.PL["PL_LOG_23"]):
-            raise DDPHandshakeError(f"Step 11 failed: wait PL {self.PL['PL_LOG_23']}, got {data}")
-        logger.info("Init 11/x passed!")
-
-        self.send_data_packet([0x20, 0x3B, 0xA0, 0x00]) # Step 12
-        logger.info("Init 12/x passed!")
-
-        data = self._recv_and_ack_data(1000) # Step 13
-        if not self.payload_is(data, self.PL["PL_LOG_27"]):
-            raise DDPHandshakeError(f"Step 13 failed: wait PL {self.PL['PL_LOG_27']}, got {data}")
-        logger.info("Init 13/x passed!")
-
-        self.send_data_packet([0x33]) # Step 14
-        logger.info("Init 14/x passed!")
-
-        self.send_data_packet([0x33]) # Step 15
-        logger.info("Init 15/x passed!")
-
-    def _init_path_red(self):
-        """Handles the Red DIS handshake path."""
-        logger.info("Following RED DIS Short Path...")
-        data = self._recv_and_ack_data(1000) # Wait for PL_LOG_14
-        if not self.payload_is(data, self.PL["PL_LOG_14"]):
-            raise DDPHandshakeError(f"RED Path failed (Step 2): wait PL {self.PL['PL_LOG_14']}, got {data}")
-        logger.info("Init 2/x (Red) passed!")
-        
-        self.send_data_packet([0x20, 0x3B, 0xA0, 0x00]) # Send 13 20...
-        logger.info("Init 3/x (Red) passed!")
-
-        data = self._recv_and_ack_data(1000) # Wait for PL_LOG_23
-        if not self.payload_is(data, self.PL["PL_LOG_23"]):
-            raise DDPHandshakeError(f"RED Path failed (Step 4): wait PL {self.PL['PL_LOG_23']}, got {data}")
-        logger.info("Init 4/x (Red) passed!")
-        
-        self.send_data_packet([0x33]) # Send 14 33
-        logger.info("Init 5/x (Red) passed!")
 
     def perform_initialization(self) -> bool:
-        """
-        Performs the complex DDP initialization handshake (Step 2).
-        This must be called after a session is active (Step 1).
-        """
-        logger.info(f"Starting DDP Step 2 Initialization for {self.dis_mode.name} DIS...")
+        logger.info(f"Starting Init Step 2 (Mode: {self.dis_mode.name})...")
         self._set_state(DDPState.INITIALIZING)
         self.send_seq_num = 0
-
-        if not self.i_am_opener:
-            logger.error("This handshake is for ACTIVE (Pi opens) mode only.")
-            self._set_state(DDPState.DISCONNECTED)
-            return False
-            
-        if self.dis_mode == DisMode.UNKNOWN:
-             logger.error("DIS mode is unknown. Cannot perform initialization.")
-             self._set_state(DDPState.DISCONNECTED)
-             return False
-
-        # Get correct payloads for our DIS type
-        self.PL = self._get_init_payloads()
-
         try:
-            # --- Common Start ---
-            self._init_common_start()
-
-            # --- Handshake Fork ---
-            # Wait for the packet that determines which path to take
-            data = self._recv_and_ack_data(1000)
-            if data is None: raise DDPHandshakeError("Timed out waiting for handshake fork packet.")
-            
-            # Handle out-of-order PL_LOG_5 (seen in some logs)
-            if self.payload_is(data, self.PL["PL_LOG_5"]):
-                logger.info("Handshake Fork: Got out-of-order packet (PL 00 01). Accepting.")
+            if self.dis_mode == DisMode.RED:
                 data = self._recv_and_ack_data(1000)
-                if data is None: raise DDPHandshakeError("Timed out after out-of-order packet.")
-
-            # --- Path B (White Short) ---
-            if self.payload_is(data, self.PL["PL_LOG_14"]) and self.dis_mode == DisMode.WHITE:
-                self._init_path_b_white()
-            
-            # --- Path C (White Long) or Path Red ---
-            elif self.payload_is(data, self.PL["PL_LOG_11"]):
-                if self.dis_mode == DisMode.RED:
-                    self._init_path_red()
-                else:
-                    self._init_path_c_white()
-            
+                if data is None: return False
+                self.send_data_packet([0x20, 0x3B, 0xA0, 0x00])
+                data = self._recv_and_ack_data(1000)
+                if data is None: return False
+                self.send_data_packet([0x33])
             else:
-                raise DDPHandshakeError(f"Handshake fork failed. Got unhandled packet {data}")
-
-            # --- Final Keep-Alive Exchange ---
-            logger.info("Sending final A3 Keep-Alive to complete handshake...")
+                self.send_data_packet([0x15, 0x01, 0x01, 0x02, 0x00, 0x00])
+                data = self._recv_message_chain(1000)
+                if not data: 
+                    logger.warning("Cluster not ready, will retry later.")
+                    return False
+                self.send_data_packet([0x01, 0x01, 0x00])
+                self.send_data_packet([0x08]) 
+                data = self._recv_message_chain(1000) 
+                if not data: raise DDPHandshakeError("Init Step 5 Timeout")
+                
+                # Parse ID for type and region
+                if data and len(data) > 1 and data[0] == 0x09:
+                    cl = data[1]
+                    if cl == 0x10:  # Color
+                        type_byte = data[2]
+                        if type_byte == 0x03:
+                            logger.info("Detected COLOR DIS TYPE 1")
+                            self.dis_mode = DisMode.COLOR_TYPE1
+                            self.opcode_offset = 0x28
+                            self.coord_bytes = 2
+                        else:
+                            logger.info("Detected COLOR DIS TYPE 2")
+                            self.dis_mode = DisMode.COLOR_TYPE2
+                            self.opcode_offset = 0x08
+                            self.coord_bytes = 1
+                        try:
+                            idx = data.index(0x30)
+                            if idx + 3 < len(data):
+                                self.region = data[idx + 3]
+                                logger.info(f"Parsed region: {self.region:02X}")
+                            else:
+                                self.region = 0x31
+                        except ValueError:
+                            self.region = 0x31
+                    elif cl == 0x20:  # Mono
+                        self.dis_mode = DisMode.WHITE if self.ka_format_long else DisMode.RED
+                        self.opcode_offset = 0x00
+                        self.coord_bytes = 1
+                        try:
+                            idx = data.index(0x30)
+                            if idx + 3 < len(data):
+                                self.region = data[idx + 3]
+                                logger.info(f"Parsed region: {self.region:02X}")
+                            else:
+                                self.region = 0x31
+                        except ValueError:
+                            self.region = 0x31
+                
+                self.send_data_packet([0x20, 0x3B, 0xA0, 0x00])
+                self._recv_message_chain(1000)
+                self.send_data_packet([0x33])
+            
             self.send_can(self.CAN_ID_SEND, self.KA_KEEP_PING)
-            
-            reply = self.KA_RED_ACCEPT if self.dis_mode == DisMode.RED else self.KA_WHITE_ACCEPT
-            if not self._recv_specific(reply, 1000):
-                raise DDPHandshakeError(f"Did not receive final {reply} ACK")
-            
-            logger.info(f"DDP Initialization COMPLETE")
+            reply = self.build_a1()
+            self._recv_specific(reply, 1000)
+            logger.info("DDP Initialization COMPLETE")
             self._set_state(DDPState.READY)
             self.last_ka_sent = time.time()
             return True
-
-        except (DDPHandshakeError, DDPAckTimeoutError, DDPCANError) as e:
+        except Exception as e:
             logger.error(f"Handshake Error: {e}")
             self._set_state(DDPState.DISCONNECTED)
             return False
-        finally:
-            # Clean up payload dict
-            if hasattr(self, 'PL'):
-                del self.PL
-
-    # --- Main Loop Functions ---
 
     def send_keepalive_if_needed(self):
-        """Sends an A3 Keep-Alive ping if we are the opener and 2s have passed."""
-        # We must allow Keep-Alives even when PAUSED, to prevent session drop
-        if self.state not in [DDPState.READY, DDPState.PAUSED]:
-            return
-        
+        if self.state not in [DDPState.READY, DDPState.PAUSED]: return
         if self.i_am_opener and time.time() - self.last_ka_sent > 2.0:
-            logger.debug("Sending A3 Keep-Alive")
             self.send_can(self.CAN_ID_SEND, self.KA_KEEP_PING)
             self.last_ka_sent = time.time()
 
     def poll_bus_events(self):
-        """
-        Main polling function. This must be called continuously.
-        Handles background traffic, status interrupts (Busy/Free), and Re-Init requests.
-        """
-        if self.state == DDPState.DISCONNECTED:
-            return
-
-        # Non-blocking read
-        data = self._recv(0) 
-        if not data:
-            return
-            
-        # 1. Handle Keep-Alives / Background ACKs / Session Logic
-        is_background_packet = self._handle_incoming_packet(data)
-
-        # 2. Process Data Packets (Status Updates / Re-Init Requests)
-        if not is_background_packet:
-            msg_type = data[0] & self.PKT_TYPE_MASK
-            msg_seq = data[0] & self.PKT_SEQ_MASK
-            payload = data[1:]
-
-            # We must ALWAYS ACK data packets (Type 0x00 or 0x10) immediately,
-            # regardless of whether we handle the content.
-            if msg_type in [0x00, self.PKT_TYPE_DATA_END]:
-                self.send_ack(msg_seq)
-
-            # --- DETECT PAUSE (Cluster Claims Screen) ---
-            if payload in [DDPMessages.STAT_BUSY_WARN_HALF, DDPMessages.STAT_BUSY_HALF,
-                           DDPMessages.STAT_BUSY_WARN_FULL, DDPMessages.STAT_BUSY_FULL]:
+        if self.state == DDPState.DISCONNECTED: return
+        while True:
+            data = self._recv(0)
+            if not data: break
+            is_bg = self._handle_incoming_packet(data)
+            if not is_bg:
+                msg_type = data[0] & self.PKT_TYPE_MASK
+                msg_seq = data[0] & self.PKT_SEQ_MASK
+                payload = data[1:]
                 
-                if self.state != DDPState.PAUSED:
-                    logger.warning(f"Cluster INTERRUPT (Status {payload}). Pausing...")
-                    self._set_state(DDPState.PAUSED)
-                    # Urgent Ping to keep session alive during warning
-                    self.send_can(self.CAN_ID_SEND, self.KA_KEEP_PING)
+                if msg_type in [0x00, self.PKT_TYPE_DATA_END]:
+                    self.send_ack(msg_seq)
 
-            # --- DETECT FREE (Cluster Releases Screen) ---
-            elif payload in [DDPMessages.STAT_FREE_HALF, DDPMessages.STAT_FREE_FULL]:
-                logger.info(f"Cluster Status FREE ({payload}). Waiting for Re-Init Request (2E)...")
-                # Do not resume yet. Protocol dictates we wait for 0x2E.
-
-            # --- HANDLE RE-INIT (Resume Sequence) ---
-            elif payload == DDPMessages.CMD_REINIT_REQ:
-                logger.info("Received Re-Init Request (2E). Sending Confirm (2F).")
+                # --- MONO STATUS CHECK ---
+                if payload in [DDPMessages.STAT_BUSY_WARN_HALF, DDPMessages.STAT_BUSY_HALF,
+                               DDPMessages.STAT_BUSY_WARN_FULL, DDPMessages.STAT_BUSY_FULL]:
+                    if self.state != DDPState.PAUSED:
+                        logger.info(f"Cluster Busy (Mono) -> PAUSED. Payload: {payload}")
+                        self._set_state(DDPState.PAUSED)
+                        self.send_can(self.CAN_ID_SEND, self.KA_KEEP_PING)
                 
-                # 1. Reply with 2F (Confirmation)
-                first_byte = self.PKT_TYPE_DATA_END + self.send_seq_num
-                pkt = [first_byte] + DDPMessages.CMD_REINIT_CONF
-                self.send_can(self.CAN_ID_SEND, pkt)
-                self.send_seq_num = (self.send_seq_num + 1) % 16
+                # --- COLOR STATUS CHECK (0x7B) ---
+                elif payload in [DDPMessages.STAT_COLOR_BUSY_HALF, DDPMessages.STAT_COLOR_BUSY_WARN_HALF,
+                                 DDPMessages.STAT_COLOR_BUSY_FULL, DDPMessages.STAT_COLOR_BUSY_WARN_FULL]:
+                    if self.state != DDPState.PAUSED:
+                        logger.info(f"Cluster Busy (Color) -> PAUSED. Payload: {payload}")
+                        self._set_state(DDPState.PAUSED)
+                        self.send_can(self.CAN_ID_SEND, self.KA_KEEP_PING)
 
-                # 2. Switch state directly to READY.
-                # CRITICAL FIX: Do NOT go to SESSION_ACTIVE. We are technically still
-                # initialized, we just need to claim the screen again.
-                self._set_state(DDPState.READY)
+                # --- FREE STATUS CHECK (Color Specific Resume) ---
+                elif payload in [DDPMessages.STAT_COLOR_FREE_HALF, DDPMessages.STAT_COLOR_FREE_FULL]:
+                     if self.dis_mode in [DisMode.COLOR_TYPE1, DisMode.COLOR_TYPE2]:
+                         if self.state == DDPState.PAUSED:
+                             logger.info(f"Color Cluster FREE ({payload}) -> Resuming immediately (No Re-Init expected).")
+                             self._set_state(DDPState.READY)
+                     else:
+                         logger.info(f"Cluster Status FREE ({payload}). Waiting for Re-Init...")
 
-            # --- HANDLE GRAPHICS ACKS (BENIGN) ---
-            elif payload == DDPMessages.STAT_GRAPHIC_ACK_WHITE or payload == DDPMessages.STAT_GRAPHIC_ACK_RED:
-                logger.debug(f"Cluster confirmed graphics update ({payload}). Ignoring.")
+                # --- FREE STATUS CHECK (Standard/Mono) ---
+                elif payload in [DDPMessages.STAT_FREE_HALF, DDPMessages.STAT_FREE_FULL]:
+                     logger.info(f"Cluster Status FREE ({payload}). Waiting for Re-Init...")
 
-            else:
-                logger.warning(f"Received unexpected data packet: {data}. (ACK sent).")
+                elif payload == DDPMessages.CMD_REINIT_REQ:
+                    logger.info("Re-Init Request. Sending Confirm.")
+                    first_byte = self.PKT_TYPE_DATA_END + self.send_seq_num
+                    self.send_can(self.CAN_ID_SEND, [first_byte] + DDPMessages.CMD_REINIT_CONF)
+                    self.send_seq_num = (self.send_seq_num + 1) % 16
+                    self._set_state(DDPState.READY)
