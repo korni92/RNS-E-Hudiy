@@ -22,6 +22,7 @@
   },
   "features": {
     "day_night_mode": true,
+    "sync_android_auto": true,
     "time_sync": {
       "enabled": true,
       "data_format": "old_logic"
@@ -115,5 +116,6 @@
      "pause_key": "KEY_C"
   }
 }
+
 
 
