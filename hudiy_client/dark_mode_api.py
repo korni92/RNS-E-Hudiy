@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hudiy Dark Mode Service
+Hudiy Dark Mode Service V1.1
 
 This service listens for CAN bus messages (via ZMQ from can_handler.py)
-to automatically toggle the Hudiy day/night mode.
+to automatically toggle the Hudiy day/night mode and optionally Android Auto.
 
 It reads /home/pi/config.json to check if the feature is enabled.
 """
@@ -30,10 +30,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Add API Files Path (UPDATED FOR NEW API STRUCTURE) ---
+# --- Add API Files Path ---
 api_path = os.path.dirname(os.path.abspath(__file__)) + '/api_files/common'
 sys.path.insert(0, api_path)
 try:
+    #  assume Api_pb2 1.1 definitions
     from Api_pb2 import *
 except ImportError:
     logger.critical(f"FATAL: Could not import Api_pb2.")
@@ -42,38 +43,62 @@ except ImportError:
 
 
 # --- Hudiy API Function ---
-def send_dark_mode(enabled, max_retries=3):
+def send_dark_mode(enabled, sync_android_auto=True, max_retries=3):
     """
     Connects to Hudiy and sends the dark mode command.
-    'enabled=True' means Dark Mode (Night).
-    'enabled=False' means Light Mode (Day).
-    Returns True if successful, False if failed.
+    
+    Args:
+        enabled (bool): True for Night, False for Day.
+        sync_android_auto (bool): If True, also sends the specific Android Auto command.
+        max_retries (int): Number of connection attempts.
+        
+    Returns:
+        bool: True if successful, False if failed.
     """
     mode_str = '🌙 Dark (night)' if enabled else '☀️ Light (day)'
+    
     for attempt in range(max_retries):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2.0)
             sock.connect(('localhost', 44405))
             
-            # 1. Hello
+            # 1. Hello (Updated to API Version 1.1)
             hello = HelloRequest()
             hello.name = "DarkModeService"
             hello.api_version.major = 1
-            hello.api_version.minor = 0
+            hello.api_version.minor = 1  # BUMPED TO 1.1
             data = hello.SerializeToString()
             frame = struct.pack('<III', len(data), MESSAGE_HELLO_REQUEST, 0) + data
             sock.sendall(frame)
             
-            # 2. Set Dark Mode
+            # 2. Set System Dark Mode (Existing Logic)
             dark = SetDarkMode()
             dark.enabled = enabled
             data = dark.SerializeToString()
             frame = struct.pack('<III', len(data), MESSAGE_SET_DARK_MODE, 0) + data
             sock.sendall(frame)
             
+            # 3. Set Android Auto Mode (New Logic)
+            if sync_android_auto:
+                try:
+                    aa_msg = SetAndroidAutoDayNightMode()
+                    # Map boolean to Enum: NIGHT=1, DAY=2 (Based on typical Proto definitions)
+                    # Using the class attributes ensures we match the generated code
+                    aa_msg.mode = SetAndroidAutoDayNightMode.NIGHT if enabled else SetAndroidAutoDayNightMode.DAY
+                    
+                    data_aa = aa_msg.SerializeToString()
+                    # Ensure MESSAGE_SET_ANDROID_AUTO_DAY_NIGHT_MODE is defined in your updated Api_pb2
+                    frame_aa = struct.pack('<III', len(data_aa), MESSAGE_SET_ANDROID_AUTO_DAY_NIGHT_MODE, 0) + data_aa
+                    sock.sendall(frame_aa)
+                    logger.debug(f"Sent Android Auto mode command: {mode_str}")
+                except NameError:
+                    logger.error("API 1.1 symbols missing in Api_pb2. Cannot set Android Auto mode.")
+                except Exception as e_aa:
+                    logger.warning(f"Sent System mode, but failed to set Android Auto: {e_aa}")
+
             sock.close()
-            logger.info(f"API call successful: Set {mode_str} mode.")
+            logger.info(f"API call successful: Set System (and AA={sync_android_auto}) to {mode_str}.")
             return True
             
         except Exception as e:
@@ -98,8 +123,9 @@ def load_config(config_path='/home/pi/config.json'):
             'zmq_publish_address': config_data.get('zmq', {}).get('publish_address'),
             'light_status_can_id': config_data.get('can_ids', {}).get('light_status'),
             'day_night_mode': config_data.get('features', {}).get('day_night_mode', False),
-            # NEW: Read initial mode preference, default to 'night' if missing
-            'initial_mode': config_data.get('features', {}).get('initial_mode', 'night')
+            'initial_mode': config_data.get('features', {}).get('initial_mode', 'night'),
+            # NEW: Toggle to control if AA follows the headlights independently
+            'sync_android_auto': config_data.get('features', {}).get('sync_android_auto', True) 
         }
 
         if not config['zmq_publish_address']:
@@ -131,21 +157,20 @@ def main():
     # --- 1. Handle Initial Mode ---
     initial_mode_str = config.get('initial_mode', 'night').lower()
     is_initial_night = (initial_mode_str == 'night')
+    sync_aa = config.get('sync_android_auto', True)
     
-    logger.info(f"Day/Night feature enabled. Default startup mode: {initial_mode_str}")
+    logger.info(f"Day/Night feature enabled. Default: {initial_mode_str}. Sync AA: {sync_aa}")
 
     # Try to set the initial mode immediately (Best Effort)
-    # We use 1 retry so we don't block startup too long if API is down
-    send_dark_mode(enabled=is_initial_night, max_retries=1)
+    send_dark_mode(enabled=is_initial_night, sync_android_auto=sync_aa, max_retries=1)
 
-    # Initialize internal state to match the configured initial mode
+    # Initialize internal state
     # 1 = Night, 0 = Day
     light_status = 1 if is_initial_night else 0
     last_msg_data = None
 
     # --- 2. ZMQ Connection ---
     zmq_address = config['zmq_publish_address']
-    # Convert "0x635" string from config to "635"
     can_id_str = config['light_status_can_id'].replace('0x', '').upper()
     can_topic = f"CAN_{can_id_str}"
     
@@ -173,11 +198,6 @@ def main():
                 continue
 
             # --- Logic Change: How we detect if we need to send ---
-            # We want to send if:
-            # A) This is the very first valid message we've seen (first_message)
-            # OR
-            # B) The CAN data has physically changed (data_hex != last_msg_data)
-            
             first_message = last_msg_data is None
 
             if first_message or data_hex != last_msg_data:
@@ -189,12 +209,9 @@ def main():
                     logger.error(f"Could not parse light value from data_hex '{data_hex}'. Error: {e}")
                     continue
 
-                # Calculate what the mode SHOULD be based on this message
                 # 1 = night (lights on), 0 = day (lights off)
                 new_light_status = 1 if light_value > 0 else 0
 
-                # Check if we need to trigger an API update
-                # We update if it's the first message OR if the status is different from what we currently have
                 if first_message or (new_light_status != light_status):
                     
                     is_dark_mode_enabled = (new_light_status == 1) 
@@ -202,20 +219,15 @@ def main():
                     
                     logger.info(f"State change required (CAN Value: {light_value}). Target: {mode_str}.")
                     
-                    # --- CRITICAL FIX ---
-                    # Only update our internal state (light_status/last_msg_data) IF the API call succeeds.
-                    # If it fails (returns False), we keep last_msg_data as None/Old.
-                    # This forces the loop to try again on the very next CAN message received.
-                    if send_dark_mode(is_dark_mode_enabled):
+                    # Update API Call with new Sync AA flag
+                    if send_dark_mode(is_dark_mode_enabled, sync_android_auto=sync_aa):
                         light_status = new_light_status
                         last_msg_data = data_hex
                         logger.info("State updated successfully.")
                     else:
                         logger.warning("API call failed. Will retry on next CAN message.")
-                        # Do NOT update last_msg_data. 
-                        # This ensures 'data_hex != last_msg_data' remains True for the next loop.
+                        # Do NOT update last_msg_data to force retry
                 else:
-                    # Status hasn't changed, just update the data tracker
                     last_msg_data = data_hex
 
         except zmq.ZMQError as e:
