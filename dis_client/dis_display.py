@@ -3,7 +3,7 @@
 import zmq, json, time, logging, sys, os
 from typing import Set, List, Dict, Union
 
-# Import Apps (Safe Import)
+# --- SAFE APP IMPORTS ---
 try:
     from apps.menu import MenuApp
     from apps.radio import RadioApp
@@ -12,8 +12,8 @@ try:
     from apps.phone import PhoneApp
     from apps.settings import SettingsApp
     from apps.car_info import CarInfoApp
-except ImportError:
-    pass
+except ImportError as e:
+    print(f"Warning: Some apps could not be loaded: {e}")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -21,86 +21,94 @@ logger = logging.getLogger(__name__)
 SETTINGS_FILE = '/home/pi/dis_settings.json'
 
 class DisplayEngine:
-    # --- Screen Layout Profiles ---
-    LAYOUTS = {
-        'mono': {
-            'width': 64,
-            'y_map': {'line1': 1, 'line2': 11, 'line3': 21, 'line4': 31, 'line5': 41}
-        },
-        # Layout 1: Menus (Header + Line + Items)
-        'color_menu': {
+    # Screen Profiles for Color Clusters
+    LAYOUTS_COLOR = {
+        'menu': {
             'text_x': 20,
             'lines': {
-                'line1': {'y': 0,   'h': 60, 'font': 0x20, 'color': 0x07}, # Header: Big Center White
-                'line2': {'y': 70,  'h': 40, 'font': 0x08, 'color': 0x07}, # Items: Small Left White
-                'line3': {'y': 110, 'h': 40, 'font': 0x08, 'color': 0x07},
-                'line4': {'y': 150, 'h': 40, 'font': 0x08, 'color': 0x07},
-                'line5': {'y': 190, 'h': 40, 'font': 0x08, 'color': 0x07}
+                'line1': {'y': 0,   'h': 60,  'font': 0x20, 'color': 0x07}, # Header
+                'line2': {'y': 70,  'h': 40,  'font': 0x08, 'color': 0x07}, # Items
+                'line3': {'y': 110, 'h': 40,  'font': 0x08, 'color': 0x07},
+                'line4': {'y': 150, 'h': 40,  'font': 0x08, 'color': 0x07},
+                'line5': {'y': 190, 'h': 40,  'font': 0x08, 'color': 0x07}
             },
-            'sep': {'y': 62, 'h': 3, 'color': 0x07} # Separator Line
+            'sep': {'y': 62, 'h': 3, 'color': 0x07}
         },
-        # Layout 2: Flat Apps (No Header, Maximize Space)
-        'color_flat': {
+        'flat': {
             'text_x': 20,
             'lines': {
-                'line1': {'y': 10,  'h': 40, 'font': 0x08, 'color': 0x07}, # Top line usage
-                'line2': {'y': 55,  'h': 40, 'font': 0x08, 'color': 0x07},
-                'line3': {'y': 100, 'h': 40, 'font': 0x08, 'color': 0x07},
-                'line4': {'y': 145, 'h': 40, 'font': 0x08, 'color': 0x07},
-                'line5': {'y': 190, 'h': 40, 'font': 0x08, 'color': 0x07}
+                'line1': {'y': 10,  'h': 40,  'font': 0x08, 'color': 0x07},
+                'line2': {'y': 55,  'h': 40,  'font': 0x08, 'color': 0x07},
+                'line3': {'y': 100, 'h': 40,  'font': 0x08, 'color': 0x07},
+                'line4': {'y': 145, 'h': 40,  'font': 0x08, 'color': 0x07},
+                'line5': {'y': 190, 'h': 40,  'font': 0x08, 'color': 0x07}
             },
-            'sep': None # No separator
+            'sep': None
         }
     }
+
+    # Line mapping for Mono (White/Red) Clusters
+    Y_MONO = {'line1': 1, 'line2': 11, 'line3': 21, 'line4': 31, 'line5': 41}
 
     def __init__(self, config_path='/home/pi/config.json'):
         with open(config_path) as f: self.cfg = json.load(f)
         self.settings = self.load_settings()
         
-        # Detect Hardware Mode
-        self.hw_mode = self.cfg.get('dis_type', 'color') 
-        if self.hw_mode not in ['mono', 'color']: self.hw_mode = 'color'
-        
-        # Helper for legacy Mono lookups
-        if self.hw_mode == 'mono':
-            self.Y = self.LAYOUTS['mono']['y_map']
+        # 1. Hardware Detection
+        self.hw_mode = self.cfg.get('dis_type', 'mono') # Default to mono if not set
+        logger.info(f"Display Engine initializing in [{self.hw_mode.upper()}] mode.")
 
-        logger.info(f"Display Engine initialized in [{self.hw_mode.upper()}] mode.")
-        
-        # --- INIT APPS ---
+        # 2. App Initialization (Unified)
         self.apps = {}
-        try:
-            self.apps['main'] = MenuApp("Main Menu", [
-                {'label': 'Media',      'target': 'menu_media'},
-                {'label': 'Car Info',   'target': 'app_car'},
-                {'label': 'Navigation', 'target': 'app_nav'},
-                {'label': 'Phone',      'target': 'app_phone'},
-                {'label': 'Settings',   'target': 'app_settings'}
-            ])
-            self.apps['menu_media'] = MenuApp("Media", [
-                {'label': 'Now Playing', 'target': 'app_media_player'},
-                {'label': 'Radio',       'target': 'app_radio'},
-                {'label': 'Back',        'target': 'BACK'}
-            ])
-            self.apps['app_radio']        = RadioApp()
-            self.apps['app_media_player'] = MediaApp()
-            self.apps['app_nav']          = NavApp()
-            self.apps['app_phone']        = PhoneApp()
-            self.apps['app_settings']     = SettingsApp(self) 
-            self.apps['app_car']          = CarInfoApp()
-        except NameError:
-            pass
+        self._init_apps()
 
-        # --- ZMQ SETUP ---
+        # 3. ZMQ Setup
         self.zmq_ctx = zmq.Context()
+        self._setup_zmq()
+
+        # 4. State Management
+        self.stack = ['main']
+        self._init_state()
+
+        # 5. Drawing Cache
+        self.last_drawn = {}      # Shared cache
+        self.last_flags = {k: 0 for k in self.Y_MONO} # Specifically for Mono logic
+        self.last_layout = None   # Specifically for Color logic
+
+        self.btn = {'up': {'p':False, 's':0, 'l':0}, 'down': {'p':False, 's':0, 'l':0}}
+
+    def _init_apps(self):
+        self.apps['main'] = MenuApp("Main Menu", [
+            {'label': 'Media',      'target': 'menu_media'},
+            {'label': 'Car Info',   'target': 'app_car'},
+            {'label': 'Navigation', 'target': 'app_nav'},
+            {'label': 'Phone',      'target': 'app_phone'},
+            {'label': 'Settings',   'target': 'app_settings'}
+        ])
+        self.apps['menu_media'] = MenuApp("Media", [
+            {'label': 'Now Playing', 'target': 'app_media_player'},
+            {'label': 'Radio',       'target': 'app_radio'},
+            {'label': 'Back',        'target': 'BACK'}
+        ])
+        self.apps['app_radio']        = RadioApp()
+        self.apps['app_media_player'] = MediaApp()
+        self.apps['app_nav']          = NavApp()
+        self.apps['app_phone']        = PhoneApp()
+        self.apps['app_settings']     = SettingsApp(self) 
+        self.apps['app_car']          = CarInfoApp()
+
+    def _setup_zmq(self):
+        # Subscriber for CAN data
         self.sub = self.zmq_ctx.socket(zmq.SUB)
         self.sub.connect(self.cfg['zmq']['publish_address'])
         
+        # Subscriber for HUDIY (Phone/Nav/Media)
         self.sub_hudiy = self.zmq_ctx.socket(zmq.SUB)
         self.sub_hudiy.connect(self.cfg['zmq']['hudiy_publish_address'])
         for t in [b'HUDIY_MEDIA', b'HUDIY_NAV', b'HUDIY_PHONE']: 
             self.sub_hudiy.subscribe(t)
 
+        # Output to display driver
         self.draw = self.zmq_ctx.socket(zmq.PUSH)
         self.draw.connect(self.cfg['zmq']['dis_draw'])
         
@@ -108,8 +116,21 @@ class DisplayEngine:
         self.poller.register(self.sub, zmq.POLLIN)
         self.poller.register(self.sub_hudiy, zmq.POLLIN)
 
-        # --- STATE ---
-        self.stack = ['main']
+        # Dynamic CAN Subscriptions
+        self.t_btn = self._topics('steering_module', '0x2C1')
+        self.t_car = set()
+        for key in ['oil_temp', 'battery', 'fuel_level']:
+             self.t_car.update(self._topics(key, '0x000'))
+        
+        # Radio specific lines (Legacy support)
+        if 'app_radio' in self.apps:
+            self.apps['app_radio'].set_topics(self._topics('fis_line1', '0x363'), self._topics('fis_line2', '0x365'))
+
+        sub_list = self.t_btn | self.t_car
+        if 'app_radio' in self.apps: sub_list |= self.apps['app_radio'].topics
+        for t in sub_list: self.sub.subscribe(t.encode())
+
+    def _init_state(self):
         start_app = self.settings.get('last_app', 'main') if self.settings.get('remember_last') else self.settings.get('startup_app', 'main')
         if start_app not in self.apps: start_app = 'main'
         if start_app != 'main':
@@ -117,24 +138,6 @@ class DisplayEngine:
             self.current_app = self.apps[start_app]
         else:
             self.current_app = self.apps['main']
-
-        # CAN Filters
-        self.t_btn = self._topics('steering_module', '0x2C1')
-        self.t_car = set()
-        for key in ['oil_temp', 'battery', 'fuel_level']:
-             self.t_car.update(self._topics(key, '0x000'))
-        
-        sub_list = self.t_btn | self.t_car
-        if 'app_radio' in self.apps: sub_list |= self.apps['app_radio'].topics
-        for t in sub_list: self.sub.subscribe(t.encode())
-
-        # Smart Redraw Cache
-        self.last_drawn = {} # Stores {line_key: (text, flags)}
-        self.last_layout = None
-
-        self.btn = {'up': {'p':False, 's':0, 'l':0}, 'down': {'p':False, 's':0, 'l':0}}
-        
-        logger.info(f"Starting App: {start_app}")
         self.current_app.on_enter()
 
     def load_settings(self):
@@ -155,7 +158,9 @@ class DisplayEngine:
         val = str(self.cfg['can_ids'].get(key, default))
         if val == '0x000': return v 
         v.add(f"CAN_{val}"); v.add(f"CAN_{val.strip()}")
-        try: n = int(val, 16); v.add(f"CAN_{n:X}"); v.add(f"CAN_0x{n:X}"); v.add(f"CAN_{n}")
+        try: 
+            n = int(val, 16)
+            v.add(f"CAN_{n:X}"); v.add(f"CAN_0x{n:X}"); v.add(f"CAN_{n}")
         except: pass
         return v
 
@@ -177,10 +182,13 @@ class DisplayEngine:
                 self.settings['last_app'] = target
                 self.save_settings()
         
-        # Clear cache on app switch to force immediate redraw of new layout
+        self.force_clear()
+
+    def force_clear(self):
         self.last_drawn = {}
+        self.last_flags = {k: 0 for k in self.Y_MONO}
         self.draw.send_json({'command': 'clear'})
-        # We don't commit here, we let the loop handle it
+        self.draw.send_json({'command': 'commit'})
 
     def process_input(self, action):
         result = self.current_app.handle_input(action)
@@ -188,16 +196,16 @@ class DisplayEngine:
 
     def run(self):
         time.sleep(1.0) 
-        self.draw.send_json({'command': 'clear'})
-        self.draw.send_json({'command': 'commit'})
+        self.force_clear()
         
         while True:
             try:
                 socks = dict(self.poller.poll(30))
                 
+                # Handle HUDIY data
                 if self.sub_hudiy in socks:
-                    while True:
-                        try:
+                    try:
+                        while True:
                             parts = self.sub_hudiy.recv_multipart(flags=zmq.NOBLOCK)
                             if len(parts) == 2:
                                 topic, msg = parts
@@ -205,13 +213,15 @@ class DisplayEngine:
                                 self.current_app.update_hudiy(topic, data)
                                 if topic == b'HUDIY_MEDIA' and 'source_label' in data:
                                     self.apps['menu_media'].set_item_label('app_media_player', data['source_label'])
-                        except zmq.Again: break
+                    except zmq.Again: pass
 
+                # Handle CAN data
                 if self.sub in socks: 
                     self._handle_can()
                 
                 self._check_buttons()
                 
+                # Dynamic Drawing Dispatcher
                 if self.hw_mode == 'color':
                     self._draw_color_smart()
                 else:
@@ -246,7 +256,6 @@ class DisplayEngine:
         if pressed:
             if not b['p']: 
                 b.update(p=True, s=now, l=False)
-                # No forced redraw needed; loop picks up change instantly
         else:
             if b['p'] and not b['l']: self.process_input(f"tap_{name}")
             b['p'] = b['l'] = False
@@ -260,119 +269,102 @@ class DisplayEngine:
                     self.process_input(f"hold_{name}")
                 elif (now - b['s'] > 5.0): b['p'] = False
 
-    #  SMART DRAWING (No Flicker)
+    # --- COLOR DRAWING ENGINE ---
     def _draw_color_smart(self):
-        # 1. Determine Layout based on App
-        # Only show Header for Main Menu and Settings. Others get Flat layout.
         app_title = getattr(self.current_app, 'title', '')
-        if app_title in ['Main Menu', 'Settings']:
-            layout_name = 'color_menu'
-        else:
-            layout_name = 'color_flat'
+        layout_name = 'menu' if app_title in ['Main Menu', 'Settings'] else 'flat'
 
-        # Check if layout changed completely
         if self.last_layout != layout_name:
             self.draw.send_json({'command': 'clear'})
-            self.last_drawn = {} # Invalidate cache
+            self.last_drawn = {}
             self.last_layout = layout_name
 
-        layout = self.LAYOUTS[layout_name]
-        lines = layout['lines']
-        sep = layout['sep']
-        text_x = layout.get('text_x', 20)
-
+        layout = self.LAYOUTS_COLOR[layout_name]
         view = self.current_app.get_view()
         
-        # Handle Raw Views (e.g. Startup Logo)
+        # Handle Custom Raw Views
         if isinstance(view, list):
             sig = str(view)
             if self.last_drawn.get('raw_sig') == sig: return
             self.draw.send_json({'command': 'clear'})
             for item in view:
-                if item.get('command') == 'draw_text' and 'opcode' not in item:
-                     item['opcode'] = 0x5F
+                if 'opcode' not in item: item['opcode'] = 0x5F
                 self.draw.send_json(item)
             self.draw.send_json({'command': 'commit'})
             self.last_drawn = {'raw_sig': sig}
             return
 
         something_changed = False
-
-        # 2. Draw Separator (Only if cache empty or layout changed)
-        if sep and 'sep_drawn' not in self.last_drawn:
-            self.draw.send_json({
-                'command': 'draw_rect',
-                'x': 0, 'y': sep['y'], 
-                'w': 220, 'h': sep['h'], 
-                'color': sep['color']
-            })
+        if layout['sep'] and 'sep_drawn' not in self.last_drawn:
+            s = layout['sep']
+            self.draw.send_json({'command': 'draw_rect', 'x': 0, 'y': s['y'], 'w': 220, 'h': s['h'], 'color': s['color']})
             self.last_drawn['sep_drawn'] = True
             something_changed = True
 
-        # 3. Iterate Lines with Diffing
-        for key, profile in lines.items():
-            # Extract Data
-            if key in view:
-                raw_val = view[key]
-                txt = raw_val[0] if isinstance(raw_val, tuple) else raw_val
-                flags = raw_val[1] if isinstance(raw_val, tuple) else 0
-            else:
-                txt = ""; flags = 0
+        for key, profile in layout['lines'].items():
+            raw_val = view.get(key, ("", 0))
+            txt, flags = raw_val if isinstance(raw_val, tuple) else (raw_val, 0)
 
-            # Compare with Cache
             cache_key = f"{key}_state"
-            prev_state = self.last_drawn.get(cache_key)
-            current_state = (txt, flags)
+            if self.last_drawn.get(cache_key) == (txt, flags): continue
 
-            if prev_state == current_state:
-                continue # No change, skip!
+            # Clear line area
+            self.draw.send_json({'command': 'draw_rect', 'x': 0, 'y': profile['y'], 'w': 220, 'h': profile['h'], 'color': 0x00})
 
-            # -- REDRAW THIS LINE --
-            # A. Clear the line area (Black Rect)
-            # This is crucial for "erasing" old text without a full screen clear
-            self.draw.send_json({
-                'command': 'draw_rect',
-                'x': 0, 'y': profile['y'],
-                'w': 220, 'h': profile['h'],
-                'color': 0x00 # Black
-            })
-
-            # B. Check Selection Highlight
+            # Selection Highlight
+            font_color = profile['color']
             if flags & 0x80:
-                # Selected: Red Background + Black Text
-                self.draw.send_json({
-                    'command': 'draw_rect',
-                    'x': 0, 'y': profile['y'], 
-                    'w': 220, 'h': profile['h'],
-                    'color': 0x04 # Red
-                })
-                font_color = 0x00 # Black
-            else:
-                # Normal: Profile Color
-                font_color = profile['color']
+                self.draw.send_json({'command': 'draw_rect', 'x': 0, 'y': profile['y'], 'w': 220, 'h': profile['h'], 'color': 0x04}) # Red
+                font_color = 0x00 # Black text on red
 
-            # C. Draw Text
             if txt:
-                self.draw.send_json({
-                    'command': 'draw_text',
-                    'text': txt,
-                    'x': text_x, # Indent
-                    'y': profile['y'],
-                    'opcode': 0x5F,
-                    'font': profile['font'],
-                    'color': font_color
-                })
+                self.draw.send_json({'command': 'draw_text', 'text': txt, 'x': layout['text_x'], 'y': profile['y'], 'opcode': 0x5F, 'font': profile['font'], 'color': font_color})
 
-            # D. Update Cache
-            self.last_drawn[cache_key] = current_state
+            self.last_drawn[cache_key] = (txt, flags)
             something_changed = True
 
-        if something_changed:
-            self.draw.send_json({'command': 'commit'})
+        if something_changed: self.draw.send_json({'command': 'commit'})
 
+    # --- MONO (WHITE/RED) DRAWING ENGINE ---
     def _draw_mono_smart(self):
-        # ... (Mono implementation unchanged for brevity, use previous if needed) ...
-        pass
+        view = self.current_app.get_view()
+        
+        # Handle Custom Raw Views
+        if isinstance(view, list):
+            sig = str(view)
+            if self.last_drawn.get('custom_sig') != sig:
+                self.draw.send_json({'command': 'clear'})
+                for item in view:
+                    cmd = item.get('cmd')
+                    if cmd == 'draw_bitmap':
+                        self.draw.send_json({'command': 'draw_bitmap', 'icon_name': item.get('icon'), 'x': item.get('x', 0), 'y': item.get('y', 0)})
+                    elif cmd == 'draw_text':
+                        self.draw.send_json({'command': 'draw_text', 'text': item.get('text', ''), 'x': item.get('x', 0), 'y': item.get('y', 0), 'flags': item.get('flags', 0x06)})
+                self.draw.send_json({'command': 'commit'})
+                self.last_drawn['custom_sig'] = sig
+            return
+
+        changed = False
+        for k, y_pos in self.Y_MONO.items():
+            raw_val = view.get(k, ("", 0))
+            txt, flag = raw_val if isinstance(raw_val, tuple) else (raw_val, 0)
+            
+            if self.last_drawn.get(k) != txt or self.last_flags.get(k) != flag:
+                # Transition logic to avoid ghosting
+                if (self.last_flags.get(k, 0) & 0x80) and not (flag & 0x80):
+                    self.draw.send_json({'command': 'clear_area', 'x': 0, 'y': y_pos, 'w': 64, 'h': 9})
+                
+                # Shrink protection
+                prev_txt = self.last_drawn.get(k, "")
+                if prev_txt and len(txt.rstrip()) < len(prev_txt.rstrip()):
+                     self.draw.send_json({'command': 'clear_area', 'x': 0, 'y': y_pos, 'w': 64, 'h': 9})
+
+                self.draw.send_json({'command':'draw_text', 'text':txt, 'y': y_pos, 'flags':flag})
+                self.last_drawn[k] = txt
+                self.last_flags[k] = flag
+                changed = True
+        
+        if changed: self.draw.send_json({'command':'commit'})
 
 if __name__ == "__main__":
     DisplayEngine().run()
