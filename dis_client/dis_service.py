@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # Unified Audi DIS Service (Color & Monochrome Support)
-# V4.0 - Visual Polish (Anti-Ghosting, Smart Caching, Traffic Reduction)
+# V4.0 - Standard Mono Logic (Reverted Hybrid opcodes based on RNS-E Log)
 #
 import zmq
 import json
@@ -50,23 +50,24 @@ class DisService:
         self.ENABLE_AUTO_RELEASE = False
         self.INACTIVITY_TIMEOUT = 30.0
        
-        # --- V4.0: Visual State Caching ---
-        # Stores the hash/content of each line to prevent redundant writes
-        # Now stores hash, text length, inverted for better artifact handling
-        self.line_cache: Dict[int, tuple[int, int, bool]] = {}  # y: (hash, len(text), is_inverted)
-        self.SCROLL_DELAY = 0.5  # Slower scrolling
-        self.CHAR_WIDTH_MONO = 5  # Assumed character width in pixels for mono displays
-        self.LINE_WIDTH_MONO = 64  # Line width in pixels for mono
-        self.LINE_HEIGHT_MONO = 9  # Line height in pixels for mono
-        self.CHAR_WIDTH_COLOR = 10  # Assumed for color
-        self.LINE_WIDTH_COLOR = 220  # For color
+        self.line_cache: Dict[int, tuple[int, int, bool]] = {}
+        self.SCROLL_DELAY = 0.5 
+        self.CHAR_WIDTH_MONO = 5 
+        self.LINE_WIDTH_MONO = 64 
+        self.LINE_HEIGHT_MONO = 9 
+        self.CHAR_WIDTH_COLOR = 10 
+        self.LINE_WIDTH_COLOR = 220 
+    
     # --- Helpers ---
     def _pack_u16(self, val: int) -> List[int]:
         return [val & 0xFF, (val >> 8) & 0xFF]
+    
     def _translate_audscii(self, text: str) -> List[int]:
         return [audscii_trans[ord(c) % 256] for c in text]
+    
     def _is_color_mode(self):
         return self.ddp.dis_mode in [DisMode.COLOR_TYPE1, DisMode.COLOR_TYPE2]
+    
     # --- Core DDP Commands ---
     def claim_nav_screen(self) -> bool:
         if self.ddp.state != DDPState.READY: return False
@@ -100,14 +101,18 @@ class DisService:
                 logger.error(f"Color Claim Failed: {e}")
                 return False
         else:
-            payload_claim = [0x52, 0x05, 0x82, 0x00, 0x1B, 0x40, 0x30]
+            # MONO / MONO HYBRID (Standard 8-bit)
             payload_ok    = [0x53, 0x85]
             payload_busy  = [0x53, 0x84]
             payload_free  = [0x53, 0x05]
             payload_ready = [0x2E]
             payload_clear_conf = [0x2F]
+            
+            # Use Standard Opcode 0x52
+            payload_claim = [0x52 + self.ddp.opcode_offset, 0x05, 0x82, 0x00, 0x1B, 0x40, 0x30]
+            
             try:
-                self.ddp.send_data_packet(payload_claim)
+                self.ddp.send_ddp_frame(payload_claim)
                 data = self.ddp._recv_and_ack_data(1000)
                
                 if self.ddp.payload_is(data, payload_ok):
@@ -122,7 +127,7 @@ class DisService:
                     if not self.ddp.payload_is(data, payload_ready):
                         raise DDPHandshakeError(f"Wait Ready failed, got {data}")
                     self.ddp.send_data_packet(payload_clear_conf)
-                    self.ddp.send_data_packet(payload_claim)
+                    self.ddp.send_ddp_frame(payload_claim)
                     data = self.ddp._recv_and_ack_data(1000)
                     if self.ddp.payload_is(data, payload_ok):
                         self.screen_is_active = True
@@ -134,6 +139,7 @@ class DisService:
             except DDPError as e:
                 logger.error(f"Mono Claim Failed: {e}")
                 return False
+
     def clear_screen(self):
         if not self.screen_is_active: self.claim_nav_screen()
         # Invalidate cache on full clear
@@ -149,6 +155,7 @@ class DisService:
             payload = [0x52 + self.ddp.opcode_offset, 0x05, 0x02, 0x00, 0x1B, 0x40, 0x30]
             self.ddp.send_ddp_frame(payload)
             self.ddp.send_ddp_frame([0x52 + self.ddp.opcode_offset, 0x05, 0x00, 0x00, 0x1B, 0x40, 0x30])
+
     def write_text(self, text: str, x: int, y: int, font: int = 0x28, color: int = 0x07, flags: int = 0x06, opcode: int = None, force_update: bool = False):
         cache_key = hash((x, y, text, font, color, flags))
         text_len = len(text)
@@ -170,12 +177,8 @@ class DisService:
         if self._is_color_mode():
             op = opcode if opcode else 0x5F
             final_color = 0x07 if color == 0x70 else color
-            font_height = 16  # Assumed; adjust based on font if known
-            if changed:
-                if text_len < old_len:
-                    # Clear full line if length decreased
-                    self.draw_rectangle(0, y, self.LINE_WIDTH_COLOR, font_height, 0)
-                elif force_update:
+            font_height = 16 
+            if changed and text_len < old_len:
                     self.draw_rectangle(0, y, self.LINE_WIDTH_COLOR, font_height, 0)
             if op == 0x5F:
                 payload = [op, len(chars)+5, font, final_color, x & 0xFF, y & 0xFF] + chars
@@ -187,35 +190,29 @@ class DisService:
             protocol_flags = flags & 0x7C
             if changed or force_update:
                 if is_inverted:
-                    # For inverted, always clear the area to red
-                    width = self.LINE_WIDTH_MONO  # Full line for simplicity
+                    width = self.LINE_WIDTH_MONO 
                     height = self.LINE_HEIGHT_MONO
-                    payload_bg = [0x52, 0x05, 0x03, x, abs_y, width, height]
-                    self.ddp.send_ddp_frame(payload_bg)
+                    self.ddp.send_ddp_frame([0x52 + self.ddp.opcode_offset, 0x05, 0x03, x, abs_y, width, height])
                     text_mode_bits = 0x00  # XOR for inverted
                     final_flags = protocol_flags | text_mode_bits
                     payload_text = [0x57 + self.ddp.opcode_offset, len(chars) + 3, final_flags, 0, 0] + chars
                     self.ddp.send_ddp_frame(payload_text)
-                    payload_reset = [0x52, 0x05, 0x00, 0x00, 0x1B, 0x40, 0x30]
-                    self.ddp.send_ddp_frame(payload_reset)
+                    self.ddp.send_ddp_frame([0x52 + self.ddp.opcode_offset, 0x05, 0x00, 0x00, 0x1B, 0x40, 0x30])
                 else:
-                    # For normal, clear only if transition from inverted or length decreased
                     if old_is_inverted:
-                        # Clear full line to black
-                        self.ddp.send_ddp_frame([0x52, 0x05, 0x02, 0, abs_y, self.LINE_WIDTH_MONO, self.LINE_HEIGHT_MONO])
-                        self.ddp.send_ddp_frame([0x52, 0x05, 0x00, 0x00, 0x1B, 0x40, 0x30])
+                        self.ddp.send_ddp_frame([0x52 + self.ddp.opcode_offset, 0x05, 0x02, 0, abs_y, self.LINE_WIDTH_MONO, self.LINE_HEIGHT_MONO])
+                        self.ddp.send_ddp_frame([0x52 + self.ddp.opcode_offset, 0x05, 0x00, 0x00, 0x1B, 0x40, 0x30])
                     if text_len < old_len:
-                        # Clear trailing area
                         trail_x = x + text_len * self.CHAR_WIDTH_MONO
                         trail_w = old_len * self.CHAR_WIDTH_MONO - text_len * self.CHAR_WIDTH_MONO
                         if trail_w > 0:
-                            self.ddp.send_ddp_frame([0x52, 0x05, 0x02, trail_x, abs_y, trail_w, self.LINE_HEIGHT_MONO])
-                            self.ddp.send_ddp_frame([0x52, 0x05, 0x00, 0x00, 0x1B, 0x40, 0x30])
-                    # Draw text opaque
+                            self.ddp.send_ddp_frame([0x52 + self.ddp.opcode_offset, 0x05, 0x02, trail_x, abs_y, trail_w, self.LINE_HEIGHT_MONO])
+                            self.ddp.send_ddp_frame([0x52 + self.ddp.opcode_offset, 0x05, 0x00, 0x00, 0x1B, 0x40, 0x30])
                     text_mode_bits = 0x02
                     final_flags = protocol_flags | text_mode_bits
                     payload = [0x57 + self.ddp.opcode_offset, len(chars) + 3, final_flags, x, y] + chars
                     self.ddp.send_ddp_frame(payload)
+
     def draw_bitmap(self, x: int, y: int, icon_name: str):
         if icon_name not in BITMAPS: return
         icon = BITMAPS[icon_name]
@@ -238,6 +235,7 @@ class DisService:
                 payload = [op_bmp, len(chunk)+3, 0x02, 0x00, i] + chunk
                 self.ddp.send_ddp_frame(payload)
             self.ddp.send_ddp_frame([0x52 + self.ddp.opcode_offset, 0x05, 0x00, 0x00, 0x1B, 0x40, 0x30])
+
     def draw_rectangle(self, x, y, w, h, color_idx):
         if self._is_color_mode():
             payload = [0x83, 0x09, color_idx] + self._pack_u16(x) + self._pack_u16(y) + self._pack_u16(w) + self._pack_u16(h)
@@ -251,19 +249,21 @@ class DisService:
                 orient = 0x20 if w > h else 0x10
                 length = w if w > h else h
                 self.ddp.send_ddp_frame([0x63 + self.ddp.opcode_offset, 0x04, orient, x, abs_y, length])
+
     def draw_line(self, x: int, y: int, length: int, vertical: bool = True):
         if self._is_color_mode():
-            # Implement if supported
             pass
         else:
             orientation = 0x10 if vertical else 0x20
             abs_y = y + 0x1B if not vertical else y
             payload = [0x63 + self.ddp.opcode_offset, 0x04, orientation, x, abs_y, length]
             self.ddp.send_ddp_frame(payload)
+
     def clear_area(self, x: int, y: int, w: int, h: int):
         self.draw_rectangle(x, y, w, h, 0)
     def commit_frame(self):
         self.ddp.send_ddp_frame([0x39])
+    
     # --- Main Loop ---
     def restore_screen(self):
         if not self.command_cache: return
@@ -277,6 +277,7 @@ class DisService:
             self._execute_command(cmd, cache=False, force_update=True, dry_run=False)
        
         self.commit_frame()
+    
     def _execute_command(self, cmd: dict, cache: bool = True, force_update: bool = False, dry_run: bool = False):
         c = cmd.get('command')
         if cache and c in ['draw_text', 'draw_bitmap', 'draw_rect', 'draw_line']:
