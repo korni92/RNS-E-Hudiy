@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# Audi DIS (Cluster) DDP Protocol Driver - V4
-# Supporting White, Red and Color DIS
+# Audi DIS (Cluster) DDP Protocol Driver - V4.0
 # Changes:
-# - FIX: Color DIS resume logic. 
-#   Color clusters do not send Re-Init (2E). detecting 'Free' (7B 05) 
-#   is enough to immediately transition to READY.
+# - NEW: "Breathing" Logic. On ACK Timeout, send A3 (Ping) loop 
+#   to give cluster time to process data (fixes timeouts on slow clusters).
+# - FIX: Reverted ID 20 03 to use Standard 8-bit commands (matches RNS-E log).
 #
 import time
 import logging
@@ -41,6 +40,7 @@ class DisMode(Enum):
     RED = auto()
     COLOR_TYPE1 = auto()
     COLOR_TYPE2 = auto()
+    MONO_HYBRID = auto() # ID 20 03
 
 class DDPMessages:
     # Mono/Red Status (Prefix 0x53)
@@ -259,7 +259,6 @@ class DDPProtocol:
         if msg_type_prefix in [0x00, self.PKT_TYPE_DATA_END, self.PKT_TYPE_DATA_BODY]:
             return False 
 
-        # We allow status messages (53 xx or 7B xx) to be handled by the poller
         if data[0] == 0x53 or data[0] == 0x7B:
             return False
 
@@ -272,7 +271,6 @@ class DDPProtocol:
         while time.time() - start < (timeout_ms / 1000.0):
             data = self._recv(0.05)
             if not data: continue
-            
             if data == expected_data: return data
             
             is_bg = self._handle_incoming_packet(data)
@@ -280,13 +278,12 @@ class DDPProtocol:
             if not is_bg:
                 msg_type = data[0] & self.PKT_TYPE_MASK
                 msg_seq = data[0] & self.PKT_SEQ_MASK
-                
                 if msg_type in [0x00, self.PKT_TYPE_DATA_END]:
                     self.send_ack(msg_seq)
             
             if self.state == DDPState.DISCONNECTED: return None
         return None
-
+        
     def _recv_message_chain(self, timeout_ms: int) -> Optional[List[int]]:
         start = time.time()
         payload_buffer = []
@@ -347,6 +344,61 @@ class DDPProtocol:
                 num_dummies -= 1
                 block_count += 1
 
+    # --- NEW: Breathing Logic Helper ---
+    def _wait_for_ack_with_breathing(self, expected_ack_byte: int) -> bool:
+        """
+        Waits for ACK. If timeout, enters 'Breathing Loop' (Sending A3)
+        to allow slow clusters to catch up.
+        """
+        # 1. Try normal wait first
+        if self._recv_specific([expected_ack_byte], self.ack_timeout_ms):
+            return True
+        
+        # 2. Check if we got it in the buffer
+        if self._rx_buffer_ack and self._rx_buffer_ack[0] == expected_ack_byte:
+            return True
+        
+        # 3. Enter Breathing Loop
+        logger.warning(f"ACK {expected_ack_byte:02X} Timeout. Entering Breathing Loop (sending A3).")
+        
+        for i in range(10): # Try 10 times (~2-3 seconds total)
+            self.send_can(self.CAN_ID_SEND, self.KA_KEEP_PING) # Send A3
+            
+            start = time.time()
+            got_keepalive_response = False
+            
+            # Wait for response (either the missing ACK or A1)
+            while time.time() - start < 0.2: 
+                data = self._recv(0.05)
+                if not data: continue
+
+                # Check for the missing ACK
+                if data[0] == expected_ack_byte:
+                    logger.info("Recovered: Delayed ACK received during breathing.")
+                    return True
+                
+                # Check for Keep-Alive Response (A1)
+                if data[0] == 0xA1:
+                    got_keepalive_response = True
+                    # Do not return yet, we still need the ACK, but at least cluster is alive.
+                
+                # Handle background packets
+                self._handle_incoming_packet(data)
+                
+                # Check buffer again
+                if self._rx_buffer_ack and self._rx_buffer_ack[0] == expected_ack_byte:
+                    logger.info("Recovered: Delayed ACK found in buffer.")
+                    return True
+
+            if not got_keepalive_response:
+                logger.warning(f"Breathing: No A1 response in attempt {i+1}.")
+            else:
+                logger.debug(f"Breathing: Got A1, waiting for ACK...")
+
+        logger.error("Breathing Loop Failed: Cluster did not ACK.")
+        return False
+    # -----------------------------------
+
     def send_data_packet(self, data: List[int], is_multi_packet_frame_body: bool = False):
         packet_type = self.PKT_TYPE_DATA_BODY if is_multi_packet_frame_body else self.PKT_TYPE_DATA_END
         first_byte = packet_type + self.send_seq_num
@@ -361,18 +413,19 @@ class DDPProtocol:
         
         expected_ack_byte = self.PKT_TYPE_ACK + self.send_seq_num 
         
-        ack_data = self._recv_specific([expected_ack_byte], self.ack_timeout_ms)
-        if ack_data:
+        # Use new Breathing Logic
+        if self._wait_for_ack_with_breathing(expected_ack_byte):
             return
-        elif self._rx_buffer_ack:
+
+        # If we are here, we failed hard. Try resync logic as last resort?
+        if self._rx_buffer_ack:
             received_ack_byte = self._rx_buffer_ack[0]
             if received_ack_byte != expected_ack_byte:
                 next_expected = received_ack_byte & 0x0F
                 self.resync(packet, original_seq, next_expected)
                 if self._recv_specific([expected_ack_byte], self.ack_timeout_ms):
                     return
-                else:
-                    raise DDPAckTimeoutError(f"Timeout after resync for ACK {expected_ack_byte:02X}")
+
         raise DDPAckTimeoutError(f"Timeout waiting for ACK {expected_ack_byte:02X}")
 
     def send_ddp_frame(self, payload: List[int]) -> bool:
@@ -405,7 +458,6 @@ class DDPProtocol:
         if self.state != DDPState.DISCONNECTED: return True
         logger.info("Detecting cluster type...")
         
-        # 1. Passive Listen
         start = time.time()
         while time.time() - start < 1.0: 
             data = self._recv(0.1)
@@ -425,7 +477,6 @@ class DDPProtocol:
                     self.ka_format_long = False
                 return True
         
-        # 2. Active Open (TP2.0)
         logger.info("No broadcast. Attempting Active Open with TP2.0.")
         our_a0 = self.KA_WHITE_OPEN
         self.send_can(self.CAN_ID_SEND, our_a0)
@@ -449,7 +500,6 @@ class DDPProtocol:
                 return True
             self._handle_incoming_packet(data)
         
-        # 3. Active Open (TP1.6)
         logger.info("No TP2.0 response. Attempting TP1.6 Active Open.")
         our_a0_short = [0xA0, self.bs, 0x00]
         self.send_can(self.CAN_ID_SEND, our_a0_short)
@@ -507,7 +557,6 @@ class DDPProtocol:
                 data = self._recv_message_chain(1000) 
                 if not data: raise DDPHandshakeError("Init Step 5 Timeout")
                 
-                # Parse ID for type and region
                 if data and len(data) > 1 and data[0] == 0x09:
                     cl = data[1]
                     if cl == 0x10:  # Color
@@ -522,28 +571,28 @@ class DDPProtocol:
                             self.dis_mode = DisMode.COLOR_TYPE2
                             self.opcode_offset = 0x08
                             self.coord_bytes = 1
-                        try:
-                            idx = data.index(0x30)
-                            if idx + 3 < len(data):
-                                self.region = data[idx + 3]
-                                logger.info(f"Parsed region: {self.region:02X}")
-                            else:
-                                self.region = 0x31
-                        except ValueError:
-                            self.region = 0x31
                     elif cl == 0x20:  # Mono
-                        self.dis_mode = DisMode.WHITE if self.ka_format_long else DisMode.RED
-                        self.opcode_offset = 0x00
-                        self.coord_bytes = 1
-                        try:
-                            idx = data.index(0x30)
-                            if idx + 3 < len(data):
-                                self.region = data[idx + 3]
-                                logger.info(f"Parsed region: {self.region:02X}")
-                            else:
-                                self.region = 0x31
-                        except ValueError:
+                        type_byte = data[2] if len(data) > 2 else 0x00
+                        if type_byte == 0x03:
+                            logger.info("Detected MONO HYBRID (ID 20 03) - Using 8-bit commands")
+                            # RNS-E LOG CONFIRMS: It uses 8-bit coords/standard opcodes
+                            self.dis_mode = DisMode.MONO_HYBRID
+                            self.coord_bytes = 1 # Back to 1 byte
+                            self.opcode_offset = 0x00 # Standard opcodes
+                        else:
+                            self.dis_mode = DisMode.WHITE if self.ka_format_long else DisMode.RED
+                            self.opcode_offset = 0x00
+                            self.coord_bytes = 1
+
+                    try:
+                        idx = data.index(0x30)
+                        if idx + 3 < len(data):
+                            self.region = data[idx + 3]
+                            logger.info(f"Parsed region: {self.region:02X}")
+                        else:
                             self.region = 0x31
+                    except ValueError:
+                        self.region = 0x31
                 
                 self.send_data_packet([0x20, 0x3B, 0xA0, 0x00])
                 self._recv_message_chain(1000)
@@ -581,7 +630,6 @@ class DDPProtocol:
                 if msg_type in [0x00, self.PKT_TYPE_DATA_END]:
                     self.send_ack(msg_seq)
 
-                # --- MONO STATUS CHECK ---
                 if payload in [DDPMessages.STAT_BUSY_WARN_HALF, DDPMessages.STAT_BUSY_HALF,
                                DDPMessages.STAT_BUSY_WARN_FULL, DDPMessages.STAT_BUSY_FULL]:
                     if self.state != DDPState.PAUSED:
@@ -589,7 +637,6 @@ class DDPProtocol:
                         self._set_state(DDPState.PAUSED)
                         self.send_can(self.CAN_ID_SEND, self.KA_KEEP_PING)
                 
-                # --- COLOR STATUS CHECK (0x7B) ---
                 elif payload in [DDPMessages.STAT_COLOR_BUSY_HALF, DDPMessages.STAT_COLOR_BUSY_WARN_HALF,
                                  DDPMessages.STAT_COLOR_BUSY_FULL, DDPMessages.STAT_COLOR_BUSY_WARN_FULL]:
                     if self.state != DDPState.PAUSED:
@@ -597,7 +644,6 @@ class DDPProtocol:
                         self._set_state(DDPState.PAUSED)
                         self.send_can(self.CAN_ID_SEND, self.KA_KEEP_PING)
 
-                # --- FREE STATUS CHECK (Color Specific Resume) ---
                 elif payload in [DDPMessages.STAT_COLOR_FREE_HALF, DDPMessages.STAT_COLOR_FREE_FULL]:
                      if self.dis_mode in [DisMode.COLOR_TYPE1, DisMode.COLOR_TYPE2]:
                          if self.state == DDPState.PAUSED:
@@ -606,7 +652,6 @@ class DDPProtocol:
                      else:
                          logger.info(f"Cluster Status FREE ({payload}). Waiting for Re-Init...")
 
-                # --- FREE STATUS CHECK (Standard/Mono) ---
                 elif payload in [DDPMessages.STAT_FREE_HALF, DDPMessages.STAT_FREE_FULL]:
                      logger.info(f"Cluster Status FREE ({payload}). Waiting for Re-Init...")
 
