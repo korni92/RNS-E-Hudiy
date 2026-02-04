@@ -456,13 +456,21 @@ class DDPProtocol:
 
     def detect_and_open_session(self) -> bool:
         if self.state != DDPState.DISCONNECTED: return True
-        logger.info("Detecting cluster type...")
+        logger.info("Detecting cluster type (Passive/Active)...")
         
+        # 1. Listen for 1.5s for any broadcast (Passive Detection)
         start = time.time()
-        while time.time() - start < 1.0: 
+        while time.time() - start < 1.5: 
             data = self._recv(0.1)
             if not data: continue
+            
+            # --- Passive Detection (Cluster is already asking or broadcasting) ---
             if data[0] == 0xA0:
+                if data == self.KA_RED_PRESENT or data == self.KA_COLOR_PRESENT:
+                    logger.info(f"Found DIS broadcast ({data[0]:02X} {data[1]:02X}).")
+                    # We continue to the Active Open logic below to respond correctly
+                    break 
+                
                 logger.info("Detected A0 open request.")
                 self.parse_params(data)
                 reply = self.build_a1()
@@ -476,47 +484,50 @@ class DDPProtocol:
                     self.dis_mode = DisMode.UNKNOWN  
                     self.ka_format_long = False
                 return True
-        
-        logger.info("No broadcast. Attempting Active Open with TP2.0.")
-        our_a0 = self.KA_WHITE_OPEN
-        self.send_can(self.CAN_ID_SEND, our_a0)
-        
-        start = time.time()
-        while time.time() - start < 0.5:
-            data = self._recv(0.05)
-            if not data: continue
-            if data[0] == 0xA1:
-                self.parse_params(data)
-                if len(data) == 6:
-                    logger.info("A1 (Long) received - White DIS detected.")
-                    self.ka_format_long = True
-                    self.dis_mode = DisMode.WHITE
-                else:
-                    logger.info("A1 (Short) received - Color or Red DIS detected.")
-                    self.ka_format_long = False
-                    self.dis_mode = DisMode.UNKNOWN
-                self.i_am_opener = True
-                self._set_state(DDPState.SESSION_ACTIVE)
-                return True
-            self._handle_incoming_packet(data)
-        
-        logger.info("No TP2.0 response. Attempting TP1.6 Active Open.")
+
+        # 2. ACTIVE OPEN: Try TP2.0 (White/Color)
+        logger.info("No broadcast. Attempting Active Open with TP2.0 (White/Color).")
+        # Try a few times in case the cluster is slow to wake
+        for attempt in range(3):
+            self.send_can(self.CAN_ID_SEND, self.KA_WHITE_OPEN)
+            start = time.time()
+            while time.time() - start < 0.6:
+                data = self._recv(0.05)
+                if not data: continue
+                if data[0] == 0xA1:
+                    self.parse_params(data)
+                    if len(data) == 6:
+                        logger.info("A1 (Long) received - White DIS detected.")
+                        self.ka_format_long = True
+                        self.dis_mode = DisMode.WHITE
+                    else:
+                        logger.info("A1 (Short) received - Color or Red DIS detected.")
+                        self.ka_format_long = False
+                        self.dis_mode = DisMode.UNKNOWN
+                    self.i_am_opener = True
+                    self._set_state(DDPState.SESSION_ACTIVE)
+                    return True
+                self._handle_incoming_packet(data)
+
+        # 3. ACTIVE OPEN: Try TP1.6 (Red DIS)
+        logger.info("No TP2.0 response. Attempting TP1.6 Active Open (Red).")
         our_a0_short = [0xA0, self.bs, 0x00]
-        self.send_can(self.CAN_ID_SEND, our_a0_short)
+        for attempt in range(3):
+            self.send_can(self.CAN_ID_SEND, our_a0_short)
+            start = time.time()
+            while time.time() - start < 0.6:
+                data = self._recv(0.05)
+                if not data: continue
+                if data[0] == 0xA1:
+                    self.parse_params(data)
+                    logger.info("A1 (TP1.6) received - Red DIS detected.")
+                    self.ka_format_long = False
+                    self.dis_mode = DisMode.RED
+                    self.i_am_opener = True
+                    self._set_state(DDPState.SESSION_ACTIVE)
+                    return True
+                self._handle_incoming_packet(data)
         
-        start = time.time()
-        while time.time() - start < 0.5:
-            data = self._recv(0.05)
-            if not data: continue
-            if data[0] == 0xA1:
-                self.parse_params(data)
-                logger.info("A1 (TP1.6) received - Red DIS detected.")
-                self.ka_format_long = False
-                self.dis_mode = DisMode.RED
-                self.i_am_opener = True
-                self._set_state(DDPState.SESSION_ACTIVE)
-                return True
-            self._handle_incoming_packet(data)
         return False
 
     def close_session(self):
