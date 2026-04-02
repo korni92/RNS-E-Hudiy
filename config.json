@@ -30,7 +30,7 @@
     },
     "auto_shutdown": {
       "enabled": true,
-      "trigger": "ignition_off",
+      "trigger": "key_pulled",
       "kl15_kls_timer_enabled": true
     },
     "tv_simulation": {
@@ -39,14 +39,18 @@
     "fis_display": {
       "enabled": true
     },
-    "dis_mode": "nav",    
+    "dis_mode": "nav",
     "source_controls": true,
     "mmi_controls": true,
     "mfsw_controls": true,
     "system_actions": true,
     "light_sensor_installed": true,
     "car_time_zone": "Europe/Berlin",
-    "debug_mode": false
+    "debug_mode": false,
+    "carpihat": {
+      "enabled": true,
+      "latch_pin": 25
+    }
   },
   "thresholds": {
     "cooldown_period": 0.2,
@@ -55,7 +59,8 @@
     "shutdown_delay_ignition_off_seconds": 900,
     "cooldown_period_no_can_seconds": 60,
     "time_sync_threshold_minutes": 0.1,
-    "daynight_cooldown_seconds": 10
+    "daynight_cooldown_seconds": 10,
+    "fallback_shutdown_seconds": 1800
   },
   "mmi_scroll_commands": [
     "0,32",
@@ -117,7 +122,3 @@
      "pause_key": "KEY_C"
   }
 }
-
-
-
-
