@@ -28,6 +28,18 @@
       "enabled": true,
       "data_format": "old_logic"
     },
+    "fis_display": {
+      "enabled": true,
+      "layout_line1": "{title}",
+      "layout_line2": "{source_label}",
+      "align_line1": "center",
+      "align_line2": "center",
+      "pad_char": "0x1C",
+      "scrolling_enabled": true,
+      "scroll_start_pause_sec": 3.0,
+      "scroll_interval_sec": 1.0,
+      "scroll_end_pause_sec": 0.5
+    },
     "auto_shutdown": {
       "enabled": true,
       "trigger": "key_pulled",
