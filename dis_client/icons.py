@@ -363,8 +363,8 @@ DEPART = {
 
 BITMAPS = {
     'STRAIGHT'          : STRAIGHT,
-    'RIGHT'             : TURN_RIGHT,
-    'LEFT'              : TURN_LEFT,
+    'RIGHT_RIGHT'       : TURN_RIGHT,
+    'LEFT_LEFT'         : TURN_LEFT,
     'SLIGHT_RIGHT'      : SLIGHT_RIGHT,
     'SLIGHT_LEFT'       : SLIGHT_LEFT,
     'SHARP_RIGHT'       : SHARP_RIGHT,
