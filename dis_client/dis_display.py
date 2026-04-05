@@ -323,7 +323,7 @@ class DisplayEngine:
                     elif cmd == 'draw_line':
                         self.draw.send_json({'command': 'draw_line', 'x': item.get('x', 0), 'y': item.get('y', 0), 'length': item.get('len', 0), 'vertical': item.get('vert', True)})
                     elif cmd == 'clear_area':
-                        self.draw.send_json({'command': 'clear_area', 'x': item.get('x', 0), 'y': item.get('y', 0), 'w': item.get('w', 64), 'h': 9})
+                        self.draw.send_json({'command': 'clear_area', 'x': item.get('x', 0), 'y': item.get('y', 0), 'w': item.get('w', 64), 'h': item.get('h', 9)})
                 
                 self.draw.send_json({'command': 'commit'})
                 self.last_sent['custom_sig'] = current_sig
