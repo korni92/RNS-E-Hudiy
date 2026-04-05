@@ -345,6 +345,28 @@ Group=input
 WantedBy=multi-user.target
 ```
 
+**File:** `/etc/systemd/system/dis_toplines.service`
+
+```ini
+[Unit]
+Description=Audi FIS Toplines Shadowing Service
+Requires=hudiy_data_api.service
+After=hudiy_data_api.service
+
+[Service]
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/dis_client
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/pi/dis_client/dis_toplines.py
+Restart=always
+RestartSec=5s
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
+```
+
 Applying Changes
 
 After creating or modifying these files, reload the systemd daemon:
@@ -353,7 +375,7 @@ After creating or modifying these files, reload the systemd daemon:
 sudo systemctl daemon-reload
 sudo systemctl enable --now can_handler.service can_base_function.service \
     can_keyboard_control.service dark_mode_api.service hudiy_data_api.service \
-    dis_service.service dis_display.service
+    dis_service.service dis_display.service dis_toplines.service
 ```
 
 -----
