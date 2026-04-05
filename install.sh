@@ -385,6 +385,26 @@ Group=input
 [Install]
 WantedBy=multi-user.target"
 
+# 8. dis_toplines
+write_service "dis_toplines.service" "[Unit]
+Description=Audi FIS Toplines Shadowing Service
+Requires=hudiy_data_api.service
+After=hudiy_data_api.service
+BindsTo=hudiy_data_api.service
+
+[Service]
+ExecStart=/usr/bin/python3 ${REAL_HOME}/dis_client/dis_toplines.py
+WorkingDirectory=${REAL_HOME}/dis_client
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5s
+KillSignal=SIGINT
+User=${REAL_USER}
+Group=${REAL_USER}
+
+[Install]
+WantedBy=multi-user.target"
+
 # --- Clean up old service ---
 if [ -f "/etc/systemd/system/configure-can0.service" ]; then
     $SYSTEMCTL disable configure-can0.service 2>/dev/null
@@ -402,7 +422,7 @@ $SYSTEMCTL enable --now can_handler.service can_base_function.service \
                         can_keyboard_control.service dark_mode_api.service hudiy_data_api.service
 
 # Start delayed services non-blocking
-$SYSTEMCTL enable --now --no-block dis_service.service dis_display.service
+$SYSTEMCTL enable --now --no-block dis_service.service dis_display.service dis_toplines.service
 
 echo "? Services installed, network configured, and started."
 
